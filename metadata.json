@@ -1,0 +1,6 @@
+{
+  "name": "ReconX — Automated Reconnaissance & Attack Surface Mapper",
+  "description": "Unified reconnaissance and attack surface mapping platform for authorized security assessments.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}

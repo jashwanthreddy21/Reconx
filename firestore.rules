@@ -1,0 +1,148 @@
+rules_version = '2';
+service cloud.firestore {
+  match /databases/{database}/documents {
+
+    // Default deny all
+    match /{document=**} {
+      allow read, write: if false;
+    }
+
+    // Helper functions
+    function isSignedIn() {
+      return request.auth != null;
+    }
+
+    function isOwner(userId) {
+      return isSignedIn() && request.auth.uid == userId;
+    }
+
+    function isAdmin() {
+      return isSignedIn() && (
+        (request.auth.token.email != null && request.auth.token.email == 'cybersafe07@gmail.com') ||
+        exists(/databases/$(database)/documents/admins/$(request.auth.uid))
+      );
+    }
+
+    function isValidId(id) {
+      return id is string && id.size() > 0 && id.size() <= 128 && id.matches('^[a-zA-Z0-9_\\-]+$');
+    }
+
+    function isAssessmentOwner(assessmentId) {
+      return isSignedIn() && (
+        get(/databases/$(database)/documents/assessments/$(assessmentId)).data.ownerId == request.auth.uid ||
+        isAdmin()
+      );
+    }
+
+    // User profiles
+    match /users/{userId} {
+      allow get: if isOwner(userId) || isAdmin();
+      allow list: if isAdmin();
+      allow create: if (isOwner(userId) || isAdmin()) &&
+        request.resource.data.email is string &&
+        request.resource.data.role in ['admin', 'analyst', 'viewer'];
+      allow update: if (isOwner(userId) || isAdmin()) &&
+        request.resource.data.role in ['admin', 'analyst', 'viewer'];
+      allow delete: if isAdmin();
+    }
+
+    // Assessments
+    match /assessments/{assessmentId} {
+      allow get: if isSignedIn() && (resource.data.ownerId == request.auth.uid || isAdmin());
+      allow list: if isSignedIn() && (resource.data.ownerId == request.auth.uid || isAdmin());
+      allow create: if isSignedIn() &&
+        isValidId(assessmentId) &&
+        request.resource.data.ownerId == request.auth.uid &&
+        request.resource.data.name is string &&
+        request.resource.data.name.size() > 0 &&
+        request.resource.data.name.size() <= 200;
+      allow update: if isSignedIn() &&
+        (resource.data.ownerId == request.auth.uid || isAdmin()) &&
+        request.resource.data.ownerId == resource.data.ownerId;
+      allow delete: if isSignedIn() &&
+        (resource.data.ownerId == request.auth.uid || isAdmin());
+
+      // Subcollection: assets
+      match /assets/{assetId} {
+        allow get: if isAssessmentOwner(assessmentId);
+        allow list: if isSignedIn() && (resource.data.ownerId == request.auth.uid || isAdmin());
+        allow create: if isAssessmentOwner(assessmentId) &&
+          request.resource.data.ownerId == request.auth.uid &&
+          request.resource.data.assessmentId == assessmentId;
+        allow update: if isAssessmentOwner(assessmentId) &&
+          request.resource.data.ownerId == resource.data.ownerId;
+        allow delete: if isAssessmentOwner(assessmentId);
+      }
+
+      // Subcollection: dns_records
+      match /dns_records/{recordId} {
+        allow get: if isAssessmentOwner(assessmentId);
+        allow list: if isSignedIn() && (resource.data.ownerId == request.auth.uid || isAdmin());
+        allow create: if isAssessmentOwner(assessmentId) &&
+          request.resource.data.ownerId == request.auth.uid &&
+          request.resource.data.assessmentId == assessmentId;
+        allow update: if isAssessmentOwner(assessmentId) &&
+          request.resource.data.ownerId == resource.data.ownerId;
+        allow delete: if isAssessmentOwner(assessmentId);
+      }
+
+      // Subcollection: web_endpoints
+      match /web_endpoints/{endpointId} {
+        allow get: if isAssessmentOwner(assessmentId);
+        allow list: if isSignedIn() && (resource.data.ownerId == request.auth.uid || isAdmin());
+        allow create: if isAssessmentOwner(assessmentId) &&
+          request.resource.data.ownerId == request.auth.uid &&
+          request.resource.data.assessmentId == assessmentId;
+        allow update: if isAssessmentOwner(assessmentId) &&
+          request.resource.data.ownerId == resource.data.ownerId;
+        allow delete: if isAssessmentOwner(assessmentId);
+      }
+
+      // Subcollection: services
+      match /services/{serviceId} {
+        allow get: if isAssessmentOwner(assessmentId);
+        allow list: if isSignedIn() && (resource.data.ownerId == request.auth.uid || isAdmin());
+        allow create: if isAssessmentOwner(assessmentId) &&
+          request.resource.data.ownerId == request.auth.uid &&
+          request.resource.data.assessmentId == assessmentId;
+        allow update: if isAssessmentOwner(assessmentId) &&
+          request.resource.data.ownerId == resource.data.ownerId;
+        allow delete: if isAssessmentOwner(assessmentId);
+      }
+
+      // Subcollection: findings
+      match /findings/{findingId} {
+        allow get: if isAssessmentOwner(assessmentId);
+        allow list: if isSignedIn() && (resource.data.ownerId == request.auth.uid || isAdmin());
+        allow create: if isAssessmentOwner(assessmentId) &&
+          request.resource.data.ownerId == request.auth.uid &&
+          request.resource.data.assessmentId == assessmentId;
+        allow update: if isAssessmentOwner(assessmentId) &&
+          request.resource.data.ownerId == resource.data.ownerId;
+        allow delete: if isAssessmentOwner(assessmentId);
+      }
+
+      // Subcollection: scan_jobs
+      match /scan_jobs/{jobId} {
+        allow get: if isAssessmentOwner(assessmentId);
+        allow list: if isSignedIn() && (resource.data.ownerId == request.auth.uid || isAdmin());
+        allow create: if isAssessmentOwner(assessmentId) &&
+          request.resource.data.ownerId == request.auth.uid &&
+          request.resource.data.assessmentId == assessmentId;
+        allow update: if isAssessmentOwner(assessmentId) &&
+          request.resource.data.ownerId == resource.data.ownerId;
+        allow delete: if isAssessmentOwner(assessmentId);
+      }
+
+      // Subcollection: audit_logs
+      match /audit_logs/{logId} {
+        allow get: if isAssessmentOwner(assessmentId);
+        allow list: if isSignedIn() && (resource.data.ownerId == request.auth.uid || isAdmin());
+        allow create: if isAssessmentOwner(assessmentId) &&
+          request.resource.data.ownerId == request.auth.uid;
+        allow update: if false; // Audit logs are immutable
+        allow delete: if isAdmin();
+      }
+    }
+  }
+}

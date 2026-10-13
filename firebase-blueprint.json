@@ -1,0 +1,476 @@
+{
+  "entities": {
+    "UserProfile": {
+      "title": "UserProfile",
+      "description": "User profile with RBAC permissions",
+      "type": "object",
+      "properties": {
+        "email": {
+          "type": "string",
+          "description": "User email address"
+        },
+        "displayName": {
+          "type": "string",
+          "description": "Full name or handle"
+        },
+        "photoURL": {
+          "type": "string",
+          "description": "Profile picture URL"
+        },
+        "role": {
+          "type": "string",
+          "enum": ["admin", "analyst", "viewer"],
+          "description": "Role-based access control level"
+        },
+        "createdAt": {
+          "type": "string",
+          "description": "Account creation timestamp"
+        },
+        "updatedAt": {
+          "type": "string",
+          "description": "Account update timestamp"
+        }
+      },
+      "required": ["email", "role", "createdAt"]
+    },
+    "Assessment": {
+      "title": "Assessment",
+      "description": "Authorized reconnaissance assessment project",
+      "type": "object",
+      "properties": {
+        "name": {
+          "type": "string",
+          "description": "Assessment project name"
+        },
+        "clientName": {
+          "type": "string",
+          "description": "Target organization or lab name"
+        },
+        "description": {
+          "type": "string",
+          "description": "Assessment scope description"
+        },
+        "ownerId": {
+          "type": "string",
+          "description": "UID of author"
+        },
+        "ownerEmail": {
+          "type": "string",
+          "description": "Email of author"
+        },
+        "type": {
+          "type": "string",
+          "enum": ["passive", "active", "mixed"],
+          "description": "Reconnaissance execution mode"
+        },
+        "status": {
+          "type": "string",
+          "enum": ["draft", "queued", "validating", "running", "partially_completed", "completed", "failed", "cancelled"],
+          "description": "Current assessment pipeline status"
+        },
+        "scope": {
+          "type": "object",
+          "description": "Authorized target specifications"
+        },
+        "toolConfig": {
+          "type": "object",
+          "description": "Security tools and scan configuration"
+        },
+        "stats": {
+          "type": "object",
+          "description": "Summary counts of discovered assets"
+        },
+        "createdAt": {
+          "type": "string",
+          "description": "Creation timestamp"
+        },
+        "updatedAt": {
+          "type": "string",
+          "description": "Last updated timestamp"
+        }
+      },
+      "required": ["name", "ownerId", "type", "status", "createdAt"]
+    },
+    "Asset": {
+      "title": "Asset",
+      "description": "Discovered target asset in inventory",
+      "type": "object",
+      "properties": {
+        "assessmentId": {
+          "type": "string",
+          "description": "Parent assessment ID"
+        },
+        "ownerId": {
+          "type": "string",
+          "description": "UID of owner"
+        },
+        "canonicalName": {
+          "type": "string",
+          "description": "Canonical asset identifier (domain, ip, url)"
+        },
+        "assetType": {
+          "type": "string",
+          "enum": ["root_domain", "subdomain", "ip_address", "endpoint", "service", "technology"],
+          "description": "Category of asset"
+        },
+        "discoverySource": {
+          "type": "string",
+          "description": "Scanner tool name"
+        },
+        "status": {
+          "type": "string",
+          "description": "Observed state"
+        },
+        "firstSeen": {
+          "type": "string",
+          "description": "First observation timestamp"
+        },
+        "lastSeen": {
+          "type": "string",
+          "description": "Most recent observation timestamp"
+        },
+        "metadata": {
+          "type": "object",
+          "description": "Tool-specific structured metadata"
+        }
+      },
+      "required": ["assessmentId", "ownerId", "canonicalName", "assetType", "discoverySource", "firstSeen", "lastSeen"]
+    },
+    "DnsRecord": {
+      "title": "DnsRecord",
+      "description": "Observed DNS resolution record",
+      "type": "object",
+      "properties": {
+        "assessmentId": {
+          "type": "string",
+          "description": "Parent assessment ID"
+        },
+        "ownerId": {
+          "type": "string",
+          "description": "UID of owner"
+        },
+        "hostname": {
+          "type": "string",
+          "description": "Queried hostname"
+        },
+        "recordType": {
+          "type": "string",
+          "enum": ["A", "AAAA", "CNAME", "MX", "NS", "TXT", "SOA", "PTR"],
+          "description": "DNS record type"
+        },
+        "value": {
+          "type": "string",
+          "description": "Answer string"
+        },
+        "ttl": {
+          "type": "number",
+          "description": "Time to live in seconds"
+        },
+        "source": {
+          "type": "string",
+          "description": "Discovery tool"
+        },
+        "timestamp": {
+          "type": "string",
+          "description": "Observation timestamp"
+        }
+      },
+      "required": ["assessmentId", "ownerId", "hostname", "recordType", "value", "timestamp"]
+    },
+    "WebEndpoint": {
+      "title": "WebEndpoint",
+      "description": "Discovered HTTP/HTTPS web application endpoint",
+      "type": "object",
+      "properties": {
+        "assessmentId": {
+          "type": "string",
+          "description": "Parent assessment ID"
+        },
+        "ownerId": {
+          "type": "string",
+          "description": "UID of owner"
+        },
+        "url": {
+          "type": "string",
+          "description": "Full target URL"
+        },
+        "hostname": {
+          "type": "string",
+          "description": "Target hostname"
+        },
+        "port": {
+          "type": "number",
+          "description": "Port number"
+        },
+        "protocol": {
+          "type": "string",
+          "description": "http or https"
+        },
+        "statusCode": {
+          "type": "number",
+          "description": "HTTP response status code"
+        },
+        "title": {
+          "type": "string",
+          "description": "HTML page title"
+        },
+        "ip": {
+          "type": "string",
+          "description": "Resolved destination IP"
+        },
+        "technologies": {
+          "type": "array",
+          "description": "Detected technologies on endpoint"
+        },
+        "tlsInfo": {
+          "type": "object",
+          "description": "TLS certificate details"
+        },
+        "timestamp": {
+          "type": "string",
+          "description": "Observation timestamp"
+        }
+      },
+      "required": ["assessmentId", "ownerId", "url", "hostname", "statusCode", "timestamp"]
+    },
+    "NetworkService": {
+      "title": "NetworkService",
+      "description": "Discovered network port and service",
+      "type": "object",
+      "properties": {
+        "assessmentId": {
+          "type": "string",
+          "description": "Parent assessment ID"
+        },
+        "ownerId": {
+          "type": "string",
+          "description": "UID of owner"
+        },
+        "host": {
+          "type": "string",
+          "description": "Target hostname"
+        },
+        "ip": {
+          "type": "string",
+          "description": "Target IP address"
+        },
+        "port": {
+          "type": "number",
+          "description": "Port number"
+        },
+        "protocol": {
+          "type": "string",
+          "description": "tcp or udp"
+        },
+        "state": {
+          "type": "string",
+          "enum": ["open", "closed", "filtered", "unknown"],
+          "description": "Port scan state"
+        },
+        "serviceName": {
+          "type": "string",
+          "description": "Discovered service name"
+        },
+        "version": {
+          "type": "string",
+          "description": "Product or version string"
+        },
+        "toolSource": {
+          "type": "string",
+          "description": "Scanner tool name"
+        },
+        "timestamp": {
+          "type": "string",
+          "description": "Observation timestamp"
+        }
+      },
+      "required": ["assessmentId", "ownerId", "host", "ip", "port", "state", "serviceName", "timestamp"]
+    },
+    "Finding": {
+      "title": "Finding",
+      "description": "Observation or attack surface risk item",
+      "type": "object",
+      "properties": {
+        "assessmentId": {
+          "type": "string",
+          "description": "Parent assessment ID"
+        },
+        "ownerId": {
+          "type": "string",
+          "description": "UID of owner"
+        },
+        "title": {
+          "type": "string",
+          "description": "Finding headline"
+        },
+        "description": {
+          "type": "string",
+          "description": "Technical narrative"
+        },
+        "severity": {
+          "type": "string",
+          "enum": ["informational", "low", "medium", "high", "critical"],
+          "description": "Severity level"
+        },
+        "confidence": {
+          "type": "string",
+          "enum": ["tentative", "firm", "certain"],
+          "description": "Confidence level"
+        },
+        "category": {
+          "type": "string",
+          "description": "Finding category"
+        },
+        "assetRef": {
+          "type": "string",
+          "description": "Referenced asset"
+        },
+        "evidence": {
+          "type": "string",
+          "description": "Empirical evidence excerpt"
+        },
+        "sourceTool": {
+          "type": "string",
+          "description": "Tool that observed the finding"
+        },
+        "remediation": {
+          "type": "string",
+          "description": "Recommended defensive measure"
+        },
+        "verificationStatus": {
+          "type": "string",
+          "enum": ["observed_fact", "potential_risk", "verified"],
+          "description": "Fact vs potential risk vs verified"
+        },
+        "firstSeen": {
+          "type": "string",
+          "description": "First seen timestamp"
+        },
+        "lastSeen": {
+          "type": "string",
+          "description": "Last seen timestamp"
+        }
+      },
+      "required": ["assessmentId", "ownerId", "title", "severity", "verificationStatus", "firstSeen", "lastSeen"]
+    },
+    "ScanJob": {
+      "title": "ScanJob",
+      "description": "Execution record for individual reconnaissance scanner",
+      "type": "object",
+      "properties": {
+        "assessmentId": {
+          "type": "string",
+          "description": "Parent assessment ID"
+        },
+        "ownerId": {
+          "type": "string",
+          "description": "UID of owner"
+        },
+        "toolName": {
+          "type": "string",
+          "description": "Tool identifier"
+        },
+        "status": {
+          "type": "string",
+          "enum": ["queued", "running", "completed", "failed", "cancelled"],
+          "description": "Job execution status"
+        },
+        "durationMs": {
+          "type": "number",
+          "description": "Execution duration in milliseconds"
+        },
+        "returnCode": {
+          "type": "number",
+          "description": "Process return code"
+        },
+        "logs": {
+          "type": "array",
+          "description": "Log lines produced during run"
+        },
+        "errorSummary": {
+          "type": "string",
+          "description": "Diagnostic error summary"
+        },
+        "createdAt": {
+          "type": "string",
+          "description": "Queued timestamp"
+        },
+        "completedAt": {
+          "type": "string",
+          "description": "Finished timestamp"
+        }
+      },
+      "required": ["assessmentId", "ownerId", "toolName", "status", "createdAt"]
+    },
+    "AuditLog": {
+      "title": "AuditLog",
+      "description": "Security audit trial entry for assessment actions",
+      "type": "object",
+      "properties": {
+        "assessmentId": {
+          "type": "string",
+          "description": "Associated assessment ID"
+        },
+        "ownerId": {
+          "type": "string",
+          "description": "UID of actor"
+        },
+        "actorEmail": {
+          "type": "string",
+          "description": "Email of actor"
+        },
+        "action": {
+          "type": "string",
+          "description": "Action name"
+        },
+        "details": {
+          "type": "string",
+          "description": "Action details"
+        },
+        "timestamp": {
+          "type": "string",
+          "description": "Audit event timestamp"
+        }
+      },
+      "required": ["ownerId", "action", "timestamp"]
+    }
+  },
+  "firestore": {
+    "/users/{userId}": {
+      "schema": "UserProfile",
+      "description": "User profile with roles and permissions"
+    },
+    "/assessments/{assessmentId}": {
+      "schema": "Assessment",
+      "description": "Security assessment projects"
+    },
+    "/assessments/{assessmentId}/assets/{assetId}": {
+      "schema": "Asset",
+      "description": "Normalized discovered attack surface assets"
+    },
+    "/assessments/{assessmentId}/dns_records/{recordId}": {
+      "schema": "DnsRecord",
+      "description": "DNS records discovered for assessment"
+    },
+    "/assessments/{assessmentId}/web_endpoints/{endpointId}": {
+      "schema": "WebEndpoint",
+      "description": "Web endpoints discovered for assessment"
+    },
+    "/assessments/{assessmentId}/services/{serviceId}": {
+      "schema": "NetworkService",
+      "description": "Discovered network services and open ports"
+    },
+    "/assessments/{assessmentId}/findings/{findingId}": {
+      "schema": "Finding",
+      "description": "Observations and prioritized risk findings"
+    },
+    "/assessments/{assessmentId}/scan_jobs/{jobId}": {
+      "schema": "ScanJob",
+      "description": "Execution status and logs for individual tool runs"
+    },
+    "/assessments/{assessmentId}/audit_logs/{logId}": {
+      "schema": "AuditLog",
+      "description": "Audit trail entries for assessment actions"
+    }
+  }
+}
