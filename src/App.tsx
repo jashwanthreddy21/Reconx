@@ -7,16 +7,22 @@ import { AssessmentDetail } from './pages/AssessmentDetail';
 import { AssessmentComparison } from './pages/AssessmentComparison';
 import { ToolDiagnostics } from './pages/ToolDiagnostics';
 import { AuditLogs } from './pages/AuditLogs';
+import { LoginPage } from './pages/LoginPage';
+import { SignupPage } from './pages/SignupPage';
+import { AiAssistantPage } from './pages/AiAssistantPage';
+import { GeminiChatbot } from './components/chat/GeminiChatbot';
 import { firestoreService } from './services/firestoreService';
 import { Assessment } from './types';
-import { ShieldAlert, Shield, ArrowRight, Lock, CheckCircle2 } from 'lucide-react';
+import { ShieldAlert, Shield, ArrowRight, Lock, CheckCircle2, UserPlus } from 'lucide-react';
 
 const ReconXMain: React.FC = () => {
   const { user, profile, loading: authLoading, signInWithGoogle } = useAuth();
   const [activePage, setActivePage] = useState<ActivePage>('dashboard');
+  const [authView, setAuthView] = useState<'landing' | 'login' | 'signup'>('landing');
   const [assessments, setAssessments] = useState<Assessment[]>([]);
   const [selectedAssessmentId, setSelectedAssessmentId] = useState<string | null>(null);
   const [loadingAssessments, setLoadingAssessments] = useState(false);
+  const [searchQuery, setSearchQuery] = useState('');
 
   // Fetch assessments when user is logged in
   useEffect(() => {
@@ -126,14 +132,43 @@ const ReconXMain: React.FC = () => {
     setActivePage('detail');
   };
 
+  const handleDeleteAssessments = async (ids: string[]) => {
+    if (user) {
+      await firestoreService.deleteAssessmentsBatch(ids);
+    }
+    setAssessments((prev) => prev.filter((a) => !ids.includes(a.id)));
+    if (selectedAssessmentId && ids.includes(selectedAssessmentId)) {
+      setSelectedAssessmentId(null);
+    }
+  };
+
   const selectedAssessment = assessments.find((a) => a.id === selectedAssessmentId) || null;
 
-  // Unauthenticated landing splash
+  // Unauthenticated routing: Landing, Login, or Signup
   if (!user && !authLoading) {
+    if (authView === 'login') {
+      return (
+        <LoginPage
+          onNavigateToSignup={() => setAuthView('signup')}
+          onNavigateToHome={() => setAuthView('landing')}
+        />
+      );
+    }
+
+    if (authView === 'signup') {
+      return (
+        <SignupPage
+          onNavigateToLogin={() => setAuthView('login')}
+          onNavigateToHome={() => setAuthView('landing')}
+        />
+      );
+    }
+
+    // Landing splash
     return (
       <div className="min-h-screen bg-[#0B1020] text-slate-100 flex flex-col justify-between selection:bg-blue-600 selection:text-white font-sans">
-        <header className="h-16 border-b border-slate-800/80 px-6 flex items-center justify-between bg-[#111827]/80 backdrop-blur">
-          <div className="flex items-center gap-2.5">
+        <header className="h-16 border-b border-slate-800/80 px-4 sm:px-6 flex items-center justify-between bg-[#111827]/80 backdrop-blur sticky top-0 z-20">
+          <div className="flex items-center gap-2.5 cursor-pointer" onClick={() => setAuthView('landing')}>
             <div className="w-8 h-8 rounded-lg bg-gradient-to-tr from-blue-600 to-cyan-500 flex items-center justify-center shadow-lg shadow-blue-500/20">
               <ShieldAlert className="w-5 h-5 text-white" />
             </div>
@@ -141,46 +176,57 @@ const ReconXMain: React.FC = () => {
               RECON<span className="text-cyan-400">X</span>
             </span>
           </div>
-          <button
-            onClick={() => signInWithGoogle()}
-            className="flex items-center gap-2 px-4 py-2 bg-blue-600 hover:bg-blue-500 text-white rounded-xl text-xs font-semibold shadow-md shadow-blue-500/20 transition-all cursor-pointer"
-          >
-            Sign In with Google
-          </button>
+
+          <div className="flex items-center gap-2 sm:gap-3">
+            <button
+              onClick={() => setAuthView('login')}
+              className="px-3 sm:px-4 py-2 bg-blue-600 hover:bg-blue-500 text-white rounded-xl text-xs font-semibold shadow-md shadow-blue-500/20 transition-all cursor-pointer"
+            >
+              Sign In
+            </button>
+            <button
+              onClick={() => setAuthView('signup')}
+              className="px-3 sm:px-4 py-2 bg-slate-800 hover:bg-slate-700 text-cyan-400 border border-slate-700 rounded-xl text-xs font-semibold transition-all cursor-pointer flex items-center gap-1.5"
+            >
+              <UserPlus className="w-3.5 h-3.5" />
+              <span>Create Account</span>
+            </button>
+          </div>
         </header>
 
-        <div className="max-w-4xl mx-auto px-6 py-16 text-center space-y-6">
-          <div className="inline-flex items-center gap-2 px-3 py-1 rounded-full bg-blue-500/10 border border-blue-500/30 text-blue-400 text-xs font-mono">
-            <Shield className="w-3.5 h-3.5" />
-            <span>Ethical Hacking Coursework &amp; Reconnaissance Platform</span>
+        <div className="max-w-4xl mx-auto px-4 sm:px-6 py-10 sm:py-16 text-center space-y-5 sm:space-y-6">
+          <div className="inline-flex items-center gap-2 px-3 py-1 rounded-full bg-blue-500/10 border border-blue-500/30 text-blue-400 text-xs font-mono max-w-full truncate">
+            <Shield className="w-3.5 h-3.5 shrink-0" />
+            <span className="truncate">Ethical Hacking Coursework &amp; Reconnaissance Platform</span>
           </div>
 
-          <h1 className="text-4xl sm:text-5xl font-extrabold text-white tracking-tight leading-tight">
+          <h1 className="text-3xl sm:text-5xl font-extrabold text-white tracking-tight leading-tight">
             Automated Reconnaissance &amp; <br />
             <span className="text-transparent bg-clip-text bg-gradient-to-r from-blue-400 via-cyan-400 to-teal-300">
               Attack Surface Mapper
             </span>
           </h1>
 
-          <p className="text-sm sm:text-base text-slate-400 max-w-2xl mx-auto leading-relaxed">
+          <p className="text-xs sm:text-base text-slate-400 max-w-2xl mx-auto leading-relaxed">
             Centralized orchestration across <strong className="text-slate-200">Subfinder</strong>,{' '}
             <strong className="text-slate-200">dnsx</strong>, <strong className="text-slate-200">httpx</strong>,{' '}
             <strong className="text-slate-200">Nmap</strong>, and <strong className="text-slate-200">WhatWeb</strong>.
             Safely discover hostnames, resolve DNS topologies, probe web endpoints, and visualize relationships on an interactive attack surface graph.
           </p>
 
-          <div className="pt-4 flex flex-wrap items-center justify-center gap-4">
+          <div className="pt-2 sm:pt-4 flex flex-col sm:flex-row items-center justify-center gap-3 sm:gap-4 w-full">
             <button
-              onClick={() => signInWithGoogle()}
-              className="flex items-center gap-2 px-6 py-3 bg-blue-600 hover:bg-blue-500 text-white rounded-xl text-sm font-semibold shadow-xl shadow-blue-600/25 transition-all cursor-pointer"
+              onClick={() => setAuthView('login')}
+              className="w-full sm:w-auto flex items-center justify-center gap-2 px-6 py-3 bg-blue-600 hover:bg-blue-500 text-white rounded-xl text-xs sm:text-sm font-semibold shadow-xl shadow-blue-600/25 transition-all cursor-pointer"
             >
-              Sign In with Google to Enter Console <ArrowRight className="w-4 h-4" />
+              Sign In to Enter Console <ArrowRight className="w-4 h-4" />
             </button>
             <button
-              onClick={handleSeedDemoLab}
-              className="flex items-center gap-2 px-6 py-3 bg-slate-800 hover:bg-slate-700 text-slate-200 rounded-xl text-sm font-medium border border-slate-700 transition-all cursor-pointer"
+              onClick={() => setAuthView('signup')}
+              className="w-full sm:w-auto flex items-center justify-center gap-2 px-6 py-3 bg-gradient-to-r from-cyan-600 to-blue-600 hover:from-cyan-500 hover:to-blue-500 text-white rounded-xl text-xs sm:text-sm font-semibold shadow-xl shadow-cyan-600/20 transition-all cursor-pointer"
             >
-              Explore Demo Lab Fixture
+              <UserPlus className="w-4 h-4" />
+              <span>Create Operator Account</span>
             </button>
           </div>
 
@@ -222,16 +268,28 @@ const ReconXMain: React.FC = () => {
       activePage={activePage}
       setActivePage={setActivePage}
       selectedAssessmentId={selectedAssessmentId}
+      onSelectAssessment={(id) => {
+        setSelectedAssessmentId(id);
+        setActivePage('detail');
+      }}
+      assessments={assessments}
+      searchQuery={searchQuery}
+      onSearchChange={setSearchQuery}
+      onOpenLogin={() => setAuthView('login')}
+      onOpenSignup={() => setAuthView('signup')}
     >
       {activePage === 'dashboard' && (
         <Dashboard
           assessments={assessments}
+          searchQuery={searchQuery}
+          onClearSearch={() => setSearchQuery('')}
           onSelectAssessment={(id) => {
             setSelectedAssessmentId(id);
             setActivePage('detail');
           }}
           onCreateNew={() => setActivePage('wizard')}
           onSeedDemoLab={handleSeedDemoLab}
+          onDeleteAssessments={handleDeleteAssessments}
           loading={loadingAssessments}
         />
       )}
@@ -261,6 +319,22 @@ const ReconXMain: React.FC = () => {
       {activePage === 'diagnostics' && <ToolDiagnostics />}
 
       {activePage === 'audit' && <AuditLogs assessments={assessments} />}
+
+      {activePage === 'ai-assistant' && (
+        <AiAssistantPage
+          currentAssessment={selectedAssessment}
+          assessments={assessments}
+          onSelectAssessment={(id) => {
+            setSelectedAssessmentId(id);
+            setActivePage('detail');
+          }}
+        />
+      )}
+
+      {/* Floating Gemini AI Copilot (visible across all non-full-page views) */}
+      {activePage !== 'ai-assistant' && (
+        <GeminiChatbot currentAssessment={selectedAssessment} />
+      )}
     </AppShell>
   );
 };

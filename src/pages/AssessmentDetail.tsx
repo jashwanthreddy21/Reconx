@@ -35,9 +35,13 @@ import {
   Code,
   Lock,
   Printer,
-  FileDown
+  FileDown,
+  Flame,
+  LayoutGrid,
+  List
 } from 'lucide-react';
 import { generateAssessmentSummaryPdf } from '../services/pdfReportGenerator';
+import { SubdomainFindingsHeatmap } from '../components/heatmap/SubdomainFindingsHeatmap';
 
 interface Props {
   assessment: Assessment;
@@ -47,6 +51,7 @@ interface Props {
 
 export type DetailTab =
   | 'overview'
+  | 'heatmap'
   | 'graph'
   | 'assets'
   | 'dns'
@@ -64,6 +69,7 @@ export const AssessmentDetail: React.FC<Props> = ({
   onBack,
 }) => {
   const [activeTab, setActiveTab] = useState<DetailTab>('overview');
+  const [findingsViewMode, setFindingsViewMode] = useState<'list' | 'heatmap'>('list');
   const [assets, setAssets] = useState<Asset[]>([]);
   const [dnsRecords, setDnsRecords] = useState<DnsRecord[]>([]);
   const [endpoints, setEndpoints] = useState<WebEndpoint[]>([]);
@@ -306,10 +312,10 @@ export const AssessmentDetail: React.FC<Props> = ({
   return (
     <div className="space-y-6 max-w-7xl mx-auto">
       {/* Top Header Card */}
-      <div className="bg-[#111827] border border-slate-800 rounded-2xl p-6 shadow-xl">
+      <div className="bg-[#111827] border border-slate-800 rounded-xl sm:rounded-2xl p-4 sm:p-6 shadow-xl">
         <div className="flex flex-col lg:flex-row lg:items-center justify-between gap-4">
           <div>
-            <div className="flex items-center gap-2 mb-1">
+            <div className="flex items-center gap-2 mb-1 flex-wrap">
               <button
                 onClick={onBack}
                 className="text-xs text-slate-400 hover:text-white flex items-center gap-1 hover:underline"
@@ -327,10 +333,10 @@ export const AssessmentDetail: React.FC<Props> = ({
               )}
             </div>
 
-            <h1 className="text-2xl font-bold text-white tracking-tight flex items-center gap-2.5">
-              {assessment.name}
+            <h1 className="text-xl sm:text-2xl font-bold text-white tracking-tight flex flex-wrap items-center gap-2 sm:gap-2.5">
+              <span>{assessment.name}</span>
               <span
-                className={`text-xs px-2.5 py-0.5 rounded-full font-mono font-medium capitalize border ${
+                className={`text-[11px] sm:text-xs px-2.5 py-0.5 rounded-full font-mono font-medium capitalize border ${
                   assessment.status === 'completed'
                     ? 'bg-emerald-500/10 text-emerald-400 border-emerald-500/30'
                     : assessment.status === 'running'
@@ -342,27 +348,27 @@ export const AssessmentDetail: React.FC<Props> = ({
               </span>
             </h1>
 
-            <p className="text-xs text-slate-400 mt-1">
+            <p className="text-[11px] sm:text-xs text-slate-400 mt-1 leading-relaxed">
               Target: <span className="text-slate-200 font-mono font-semibold">{assessment.scope.rootDomain}</span> • Client:{' '}
               <span className="text-slate-200">{assessment.clientName}</span> • Type:{' '}
               <span className="capitalize text-slate-200">{assessment.type}</span> • Started:{' '}
-              {new Date(assessment.createdAt).toLocaleString()}
+              {new Date(assessment.createdAt).toLocaleDateString()}
             </p>
           </div>
 
           {/* Action buttons */}
-          <div className="flex flex-wrap items-center gap-2">
+          <div className="flex flex-wrap items-center gap-2 w-full lg:w-auto">
             {isScanning ? (
               <button
                 onClick={handleCancelScan}
-                className="flex items-center gap-1.5 px-4 py-2 bg-rose-600 hover:bg-rose-500 text-white rounded-xl text-xs font-semibold shadow-lg shadow-rose-600/20 transition-all cursor-pointer"
+                className="flex items-center gap-1.5 px-3.5 py-2 bg-rose-600 hover:bg-rose-500 text-white rounded-xl text-xs font-semibold shadow-lg shadow-rose-600/20 transition-all cursor-pointer"
               >
                 <StopCircle className="w-4 h-4" /> Cancel Scan
               </button>
             ) : (
               <button
                 onClick={handleStartScan}
-                className="flex items-center gap-1.5 px-4 py-2 bg-blue-600 hover:bg-blue-500 text-white rounded-xl text-xs font-semibold shadow-lg shadow-blue-600/20 transition-all cursor-pointer"
+                className="flex items-center gap-1.5 px-3.5 py-2 bg-blue-600 hover:bg-blue-500 text-white rounded-xl text-xs font-semibold shadow-lg shadow-blue-600/20 transition-all cursor-pointer"
               >
                 <Play className="w-4 h-4" /> Re-Run Pipeline
               </button>
@@ -370,7 +376,7 @@ export const AssessmentDetail: React.FC<Props> = ({
 
             <button
               onClick={handleDownloadSummaryPdf}
-              className="flex items-center gap-1.5 px-3.5 py-2 bg-gradient-to-r from-blue-600 to-cyan-600 hover:from-blue-500 hover:to-cyan-500 text-white rounded-xl text-xs font-semibold shadow-lg shadow-blue-500/20 transition-all cursor-pointer"
+              className="flex items-center gap-1.5 px-3 sm:px-3.5 py-2 bg-gradient-to-r from-blue-600 to-cyan-600 hover:from-blue-500 hover:to-cyan-500 text-white rounded-xl text-xs font-semibold shadow-lg shadow-blue-500/20 transition-all cursor-pointer"
               title="Generate summary PDF report with scope, tool configs, and findings count"
             >
               <FileDown className="w-4 h-4" /> Summary PDF Report
@@ -390,6 +396,7 @@ export const AssessmentDetail: React.FC<Props> = ({
         <div className="flex items-center gap-1 overflow-x-auto border-t border-slate-800/80 pt-4 mt-5 text-xs">
           {[
             { id: 'overview' as DetailTab, label: 'Overview', icon: Activity },
+            { id: 'heatmap' as DetailTab, label: 'Subdomain Heatmap', icon: Flame, count: findings.length },
             { id: 'graph' as DetailTab, label: 'Attack Surface Graph', icon: Globe, count: assets.length },
             { id: 'assets' as DetailTab, label: 'Asset Inventory', icon: Server, count: assets.length },
             { id: 'dns' as DetailTab, label: 'DNS Explorer', icon: Layers, count: dnsRecords.length },
@@ -595,7 +602,45 @@ export const AssessmentDetail: React.FC<Props> = ({
               </div>
             </div>
           </div>
+
+          {/* Subdomain Findings Heatmap Quick Card */}
+          <div className="bg-[#111827] border border-slate-800 rounded-xl p-5 shadow-lg flex flex-col md:flex-row md:items-center justify-between gap-4">
+            <div className="space-y-1">
+              <div className="flex items-center gap-2">
+                <Flame className="w-5 h-5 text-rose-500" />
+                <h3 className="text-sm font-semibold text-white">
+                  Subdomain Risk &amp; Finding Severity Heatmap
+                </h3>
+                <span className="text-[10px] font-mono px-2 py-0.5 rounded-full bg-rose-500/10 text-rose-400 border border-rose-500/30">
+                  D3.js Visualization
+                </span>
+              </div>
+              <p className="text-xs text-slate-400 max-w-2xl">
+                Matrix correlating vulnerability counts and severity tiers (Critical, High, Medium, Low, Informational) across all cataloged subdomains.
+              </p>
+            </div>
+            <button
+              onClick={() => setActiveTab('heatmap')}
+              className="flex items-center gap-2 px-4 py-2 bg-gradient-to-r from-rose-600 to-amber-600 hover:from-rose-500 hover:to-amber-500 text-white rounded-xl text-xs font-semibold shadow-lg shadow-rose-600/20 transition-all cursor-pointer whitespace-nowrap"
+            >
+              <Flame className="w-4 h-4" /> Open Interactive Heatmap
+            </button>
+          </div>
         </div>
+      )}
+
+      {/* TAB: SUBDOMAIN HEATMAP (D3.js) */}
+      {activeTab === 'heatmap' && (
+        <SubdomainFindingsHeatmap
+          assessment={assessment}
+          findings={findings}
+          assets={assets}
+          onSelectFinding={(f) => {
+            setFindingSeverityFilter(f.severity);
+            setFindingsViewMode('list');
+            setActiveTab('findings');
+          }}
+        />
       )}
 
       {/* TAB 2: INTERACTIVE GRAPH */}
@@ -932,76 +977,113 @@ export const AssessmentDetail: React.FC<Props> = ({
             <div>
               <h3 className="text-base font-semibold text-white">Centralized Observations &amp; Risk Findings</h3>
               <p className="text-xs text-slate-400 mt-0.5">
-                Facts vs potential risks. Transparent evidence and remediation guides.
+                Facts vs potential risks. Transparent evidence, subdomain correlation, and remediation guides.
               </p>
             </div>
 
-            <div className="flex items-center gap-2">
-              <select
-                value={findingSeverityFilter}
-                onChange={(e) => setFindingSeverityFilter(e.target.value)}
-                className="px-3 py-1.5 text-xs bg-slate-950 border border-slate-700 rounded-xl text-slate-300 focus:outline-none"
-              >
-                <option value="all">All Severities</option>
-                <option value="critical">Critical</option>
-                <option value="high">High</option>
-                <option value="medium">Medium</option>
-                <option value="low">Low</option>
-                <option value="informational">Informational</option>
-              </select>
+            <div className="flex flex-wrap items-center gap-2">
+              <div className="flex items-center bg-slate-950 p-1 rounded-xl border border-slate-800 text-xs">
+                <button
+                  onClick={() => setFindingsViewMode('list')}
+                  className={`flex items-center gap-1.5 px-3 py-1 rounded-lg font-medium transition-all ${
+                    findingsViewMode === 'list'
+                      ? 'bg-blue-600/30 text-cyan-300 font-semibold border border-blue-500/40'
+                      : 'text-slate-400 hover:text-slate-200'
+                  }`}
+                >
+                  <List className="w-3.5 h-3.5" /> List View
+                </button>
+                <button
+                  onClick={() => setFindingsViewMode('heatmap')}
+                  className={`flex items-center gap-1.5 px-3 py-1 rounded-lg font-medium transition-all ${
+                    findingsViewMode === 'heatmap'
+                      ? 'bg-rose-600/30 text-rose-300 font-semibold border border-rose-500/40'
+                      : 'text-slate-400 hover:text-slate-200'
+                  }`}
+                >
+                  <Flame className="w-3.5 h-3.5 text-rose-500" /> Subdomain Heatmap
+                </button>
+              </div>
+
+              {findingsViewMode === 'list' && (
+                <select
+                  value={findingSeverityFilter}
+                  onChange={(e) => setFindingSeverityFilter(e.target.value)}
+                  className="px-3 py-1.5 text-xs bg-slate-950 border border-slate-700 rounded-xl text-slate-300 focus:outline-none"
+                >
+                  <option value="all">All Severities</option>
+                  <option value="critical">Critical</option>
+                  <option value="high">High</option>
+                  <option value="medium">Medium</option>
+                  <option value="low">Low</option>
+                  <option value="informational">Informational</option>
+                </select>
+              )}
             </div>
           </div>
 
-          <div className="space-y-4">
-            {findings
-              .filter((f) => findingSeverityFilter === 'all' || f.severity === findingSeverityFilter)
-              .map((f) => (
-                <div key={f.id} className="p-5 bg-slate-950 rounded-xl border border-slate-800 space-y-3">
-                  <div className="flex flex-wrap items-start justify-between gap-2">
-                    <div>
-                      <div className="flex items-center gap-2 mb-1">
-                        <span
-                          className={`text-[10px] px-2.5 py-0.5 rounded font-mono font-bold uppercase border ${getSeverityBadge(
-                            f.severity
-                          )}`}
-                        >
-                          {f.severity}
-                        </span>
-                        <span className="text-[10px] font-mono px-2 py-0.5 rounded bg-slate-800 text-slate-400">
-                          {f.verificationStatus.replace('_', ' ')}
-                        </span>
-                        <span className="text-[10px] text-slate-500 font-mono">
-                          Source: {f.sourceTool}
-                        </span>
+          {findingsViewMode === 'heatmap' ? (
+            <SubdomainFindingsHeatmap
+              assessment={assessment}
+              findings={findings}
+              assets={assets}
+              onSelectFinding={(f) => {
+                setFindingSeverityFilter(f.severity);
+                setFindingsViewMode('list');
+              }}
+            />
+          ) : (
+            <div className="space-y-4">
+              {findings
+                .filter((f) => findingSeverityFilter === 'all' || f.severity === findingSeverityFilter)
+                .map((f) => (
+                  <div key={f.id} className="p-5 bg-slate-950 rounded-xl border border-slate-800 space-y-3">
+                    <div className="flex flex-wrap items-start justify-between gap-2">
+                      <div>
+                        <div className="flex items-center gap-2 mb-1">
+                          <span
+                            className={`text-[10px] px-2.5 py-0.5 rounded font-mono font-bold uppercase border ${getSeverityBadge(
+                              f.severity
+                            )}`}
+                          >
+                            {f.severity}
+                          </span>
+                          <span className="text-[10px] font-mono px-2 py-0.5 rounded bg-slate-800 text-slate-400">
+                            {f.verificationStatus.replace('_', ' ')}
+                          </span>
+                          <span className="text-[10px] text-slate-500 font-mono">
+                            Source: {f.sourceTool}
+                          </span>
+                        </div>
+                        <h4 className="text-sm font-semibold text-white">{f.title}</h4>
                       </div>
-                      <h4 className="text-sm font-semibold text-white">{f.title}</h4>
+
+                      <div className="text-xs font-mono text-cyan-300 bg-slate-900 px-2.5 py-1 rounded border border-slate-800">
+                        Asset: {f.assetRef}
+                      </div>
                     </div>
 
-                    <div className="text-xs font-mono text-cyan-300 bg-slate-900 px-2.5 py-1 rounded border border-slate-800">
-                      Asset: {f.assetRef}
+                    <p className="text-xs text-slate-300 leading-relaxed">{f.description}</p>
+
+                    <div className="p-3 bg-slate-900/80 rounded-lg border border-slate-800/80 space-y-2 text-xs">
+                      <div>
+                        <span className="text-[11px] font-semibold text-slate-400 block uppercase font-mono">
+                          Evidence:
+                        </span>
+                        <p className="text-slate-300 font-mono text-[11px] mt-0.5">{f.evidence}</p>
+                      </div>
+
+                      <div className="pt-2 border-t border-slate-800">
+                        <span className="text-[11px] font-semibold text-emerald-400 block uppercase font-mono">
+                          Remediation &amp; Next Steps:
+                        </span>
+                        <p className="text-slate-300 text-[11px] mt-0.5">{f.remediation}</p>
+                      </div>
                     </div>
                   </div>
-
-                  <p className="text-xs text-slate-300 leading-relaxed">{f.description}</p>
-
-                  <div className="p-3 bg-slate-900/80 rounded-lg border border-slate-800/80 space-y-2 text-xs">
-                    <div>
-                      <span className="text-[11px] font-semibold text-slate-400 block uppercase font-mono">
-                        Evidence:
-                      </span>
-                      <p className="text-slate-300 font-mono text-[11px] mt-0.5">{f.evidence}</p>
-                    </div>
-
-                    <div className="pt-2 border-t border-slate-800">
-                      <span className="text-[11px] font-semibold text-emerald-400 block uppercase font-mono">
-                        Remediation &amp; Next Steps:
-                      </span>
-                      <p className="text-slate-300 text-[11px] mt-0.5">{f.remediation}</p>
-                    </div>
-                  </div>
-                </div>
-              ))}
-          </div>
+                ))}
+            </div>
+          )}
         </div>
       )}
 

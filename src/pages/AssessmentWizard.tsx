@@ -176,27 +176,48 @@ export const AssessmentWizard: React.FC<Props> = ({ onAssessmentCreated, onCance
   return (
     <div className="max-w-4xl mx-auto space-y-6">
       {/* Step Indicator Header */}
-      <div className="bg-[#111827] border border-slate-800 rounded-2xl p-6 shadow-xl">
-        <div className="flex items-center justify-between mb-6">
+      <div className="bg-[#111827] border border-slate-800 rounded-xl sm:rounded-2xl p-4 sm:p-6 shadow-xl">
+        <div className="flex items-center justify-between mb-4 sm:mb-6">
           <div>
-            <h2 className="text-xl font-bold text-white tracking-tight flex items-center gap-2">
-              <Shield className="w-5 h-5 text-blue-500" />
-              Assessment Launch Wizard
+            <h2 className="text-lg sm:text-xl font-bold text-white tracking-tight flex items-center gap-2">
+              <Shield className="w-5 h-5 text-blue-500 shrink-0" />
+              <span>Assessment Launch Wizard</span>
             </h2>
-            <p className="text-xs text-slate-400 mt-0.5">
-              5-step controlled authorization, scope boundary, and tool orchestration setup
+            <p className="text-[11px] sm:text-xs text-slate-400 mt-0.5">
+              5-step controlled authorization, scope boundary, and tool orchestration
             </p>
           </div>
           <button
             onClick={onCancel}
-            className="text-xs text-slate-400 hover:text-white px-3 py-1.5 rounded-lg hover:bg-slate-800"
+            className="text-xs text-slate-400 hover:text-white px-2.5 sm:px-3 py-1.5 rounded-lg hover:bg-slate-800 shrink-0"
           >
             Cancel
           </button>
         </div>
 
-        {/* Steps track */}
-        <div className="grid grid-cols-5 gap-2">
+        {/* Mobile Step Indicator */}
+        <div className="sm:hidden space-y-2">
+          <div className="flex items-center justify-between text-xs font-mono">
+            <span className="text-white font-semibold">
+              Step {step}/5: {
+                step === 1 ? 'Details' :
+                step === 2 ? 'Scope & ROE' :
+                step === 3 ? 'Tools' :
+                step === 4 ? 'Execution' : 'Review'
+              }
+            </span>
+            <span className="text-cyan-400 text-[11px]">{Math.round((step / 5) * 100)}%</span>
+          </div>
+          <div className="w-full bg-slate-800 h-1.5 rounded-full overflow-hidden">
+            <div
+              className="bg-gradient-to-r from-blue-500 to-cyan-400 h-full transition-all duration-300 rounded-full"
+              style={{ width: `${(step / 5) * 100}%` }}
+            />
+          </div>
+        </div>
+
+        {/* Desktop Steps track */}
+        <div className="hidden sm:grid sm:grid-cols-5 gap-2">
           {[
             { stepNum: 1, title: 'Details' },
             { stepNum: 2, title: 'Scope & ROE' },

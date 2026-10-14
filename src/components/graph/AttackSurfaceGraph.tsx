@@ -361,25 +361,25 @@ export const AttackSurfaceGraph: React.FC<Props> = ({
   };
 
   return (
-    <div className="relative w-full h-[640px] bg-slate-950 border border-slate-800 rounded-xl overflow-hidden select-none">
+    <div className="relative w-full h-[480px] sm:h-[640px] bg-slate-950 border border-slate-800 rounded-xl overflow-hidden select-none">
       {/* Top Toolbar */}
-      <div className="absolute top-3 left-3 right-3 z-10 flex flex-wrap items-center justify-between gap-2 pointer-events-none">
-        <div className="flex items-center gap-2 pointer-events-auto bg-slate-900/90 backdrop-blur border border-slate-800 rounded-lg p-1.5 shadow-lg">
+      <div className="absolute top-2 left-2 right-2 sm:top-3 sm:left-3 sm:right-3 z-10 flex flex-wrap items-center justify-between gap-1.5 sm:gap-2 pointer-events-none">
+        <div className="flex items-center gap-1.5 sm:gap-2 pointer-events-auto bg-slate-900/90 backdrop-blur border border-slate-800 rounded-lg p-1 sm:p-1.5 shadow-lg max-w-full overflow-x-auto">
           <div className="relative">
-            <Search className="w-4 h-4 text-slate-400 absolute left-2.5 top-2.5" />
+            <Search className="w-3.5 h-3.5 sm:w-4 sm:h-4 text-slate-400 absolute left-2 top-2 sm:left-2.5 sm:top-2.5" />
             <input
               type="text"
-              placeholder="Search assets..."
+              placeholder="Search..."
               value={searchQuery}
               onChange={(e) => setSearchQuery(e.target.value)}
-              className="pl-8 pr-3 py-1 text-xs bg-slate-950 border border-slate-700 rounded-md text-slate-200 placeholder-slate-500 focus:outline-none focus:border-blue-500 w-44"
+              className="pl-7 sm:pl-8 pr-2 sm:pr-3 py-1 text-[11px] sm:text-xs bg-slate-950 border border-slate-700 rounded-md text-slate-200 placeholder-slate-500 focus:outline-none focus:border-blue-500 w-28 sm:w-44"
             />
           </div>
 
-          <div className="h-4 w-px bg-slate-700" />
+          <div className="h-4 w-px bg-slate-700 hidden sm:block" />
 
           {/* Quick type toggles */}
-          <div className="flex items-center gap-1">
+          <div className="hidden sm:flex items-center gap-1">
             {(['root_domain', 'subdomain', 'ip_address', 'endpoint', 'service', 'technology'] as AssetType[]).map((t) => (
               <button
                 key={t}
@@ -401,35 +401,35 @@ export const AttackSurfaceGraph: React.FC<Props> = ({
         </div>
 
         {/* View Controls */}
-        <div className="flex items-center gap-1 pointer-events-auto bg-slate-900/90 backdrop-blur border border-slate-800 rounded-lg p-1.5 shadow-lg">
+        <div className="flex items-center gap-0.5 sm:gap-1 pointer-events-auto bg-slate-900/90 backdrop-blur border border-slate-800 rounded-lg p-1 sm:p-1.5 shadow-lg">
           <button
             onClick={() => setZoom((z) => Math.min(z * 1.2, 3))}
             title="Zoom In"
-            className="p-1.5 text-slate-400 hover:text-white hover:bg-slate-800 rounded"
+            className="p-1 sm:p-1.5 text-slate-400 hover:text-white hover:bg-slate-800 rounded"
           >
-            <ZoomIn className="w-4 h-4" />
+            <ZoomIn className="w-3.5 h-3.5 sm:w-4 sm:h-4" />
           </button>
           <button
             onClick={() => setZoom((z) => Math.max(z * 0.8, 0.4))}
             title="Zoom Out"
-            className="p-1.5 text-slate-400 hover:text-white hover:bg-slate-800 rounded"
+            className="p-1 sm:p-1.5 text-slate-400 hover:text-white hover:bg-slate-800 rounded"
           >
-            <ZoomOut className="w-4 h-4" />
+            <ZoomOut className="w-3.5 h-3.5 sm:w-4 sm:h-4" />
           </button>
           <button
             onClick={resetView}
             title="Fit to Screen"
-            className="p-1.5 text-slate-400 hover:text-white hover:bg-slate-800 rounded"
+            className="p-1 sm:p-1.5 text-slate-400 hover:text-white hover:bg-slate-800 rounded"
           >
-            <Maximize2 className="w-4 h-4" />
+            <Maximize2 className="w-3.5 h-3.5 sm:w-4 sm:h-4" />
           </button>
           <div className="h-4 w-px bg-slate-700" />
           <button
             onClick={exportGraphJson}
             title="Export Graph JSON"
-            className="p-1.5 text-slate-400 hover:text-white hover:bg-slate-800 rounded flex items-center gap-1 text-xs"
+            className="p-1 sm:p-1.5 text-slate-400 hover:text-white hover:bg-slate-800 rounded flex items-center gap-1 text-xs"
           >
-            <Download className="w-4 h-4" />
+            <Download className="w-3.5 h-3.5 sm:w-4 sm:h-4" />
           </button>
         </div>
       </div>
@@ -565,7 +565,7 @@ export const AttackSurfaceGraph: React.FC<Props> = ({
 
       {/* Side Detail Inspector Panel */}
       {selectedNode && (
-        <div className="absolute top-16 right-4 w-80 bg-slate-900/95 backdrop-blur-md border border-slate-700/80 rounded-xl p-4 shadow-2xl z-20 text-slate-200">
+        <div className="absolute top-14 left-2 right-2 sm:left-auto sm:right-4 sm:w-80 bg-slate-900/95 backdrop-blur-md border border-slate-700/80 rounded-xl p-3.5 sm:p-4 shadow-2xl z-20 text-slate-200 max-h-[80%] overflow-y-auto">
           <div className="flex items-start justify-between gap-2 border-b border-slate-800 pb-3 mb-3">
             <div>
               <div className="flex items-center gap-1.5 mb-1">
@@ -621,24 +621,24 @@ export const AttackSurfaceGraph: React.FC<Props> = ({
       )}
 
       {/* Legend at bottom left */}
-      <div className="absolute bottom-3 left-3 bg-slate-900/80 backdrop-blur border border-slate-800/80 rounded-lg px-3 py-2 flex items-center gap-4 text-[11px] text-slate-400 pointer-events-none">
+      <div className="absolute bottom-2 left-2 sm:bottom-3 sm:left-3 bg-slate-900/90 backdrop-blur border border-slate-800/80 rounded-lg px-2 sm:px-3 py-1.5 sm:py-2 hidden xs:flex flex-wrap items-center gap-2 sm:gap-4 text-[10px] sm:text-[11px] text-slate-400 pointer-events-none max-w-[90%]">
         <div className="flex items-center gap-1.5">
-          <span className="w-2.5 h-2.5 rounded-full bg-blue-500" /> Root Domain
+          <span className="w-2 h-2 sm:w-2.5 sm:h-2.5 rounded-full bg-blue-500" /> Root
         </div>
         <div className="flex items-center gap-1.5">
-          <span className="w-2.5 h-2.5 rounded-full bg-cyan-400" /> Subdomain
+          <span className="w-2 h-2 sm:w-2.5 sm:h-2.5 rounded-full bg-cyan-400" /> Subdomain
         </div>
         <div className="flex items-center gap-1.5">
-          <span className="w-2.5 h-2.5 rounded-full bg-emerald-500" /> IP Address
+          <span className="w-2 h-2 sm:w-2.5 sm:h-2.5 rounded-full bg-emerald-500" /> IP
         </div>
         <div className="flex items-center gap-1.5">
-          <span className="w-2.5 h-2.5 rounded-full bg-purple-500" /> Endpoint
+          <span className="w-2 h-2 sm:w-2.5 sm:h-2.5 rounded-full bg-purple-500" /> Endpoint
         </div>
         <div className="flex items-center gap-1.5">
-          <span className="w-2.5 h-2.5 rounded-full bg-amber-500" /> Service
+          <span className="w-2 h-2 sm:w-2.5 sm:h-2.5 rounded-full bg-amber-500" /> Service
         </div>
         <div className="flex items-center gap-1.5">
-          <span className="w-2.5 h-2.5 rounded-full bg-pink-500" /> Tech
+          <span className="w-2 h-2 sm:w-2.5 sm:h-2.5 rounded-full bg-pink-500" /> Tech
         </div>
       </div>
     </div>

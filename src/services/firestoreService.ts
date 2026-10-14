@@ -43,7 +43,17 @@ export const firestoreService = {
   async saveUserProfile(profile: UserProfile): Promise<void> {
     const path = `users/${profile.id}`;
     try {
-      await setDoc(doc(db, 'users', profile.id), profile, { merge: true });
+      const dataToSave: Record<string, any> = {
+        id: profile.id,
+        email: profile.email,
+        displayName: profile.displayName || '',
+        role: profile.role,
+        createdAt: profile.createdAt || new Date().toISOString(),
+      };
+      if (profile.photoURL) dataToSave.photoURL = profile.photoURL;
+      if (profile.updatedAt) dataToSave.updatedAt = profile.updatedAt;
+
+      await setDoc(doc(db, 'users', profile.id), dataToSave, { merge: true });
     } catch (err) {
       handleFirestoreError(err, OperationType.WRITE, path);
     }
@@ -113,6 +123,25 @@ export const firestoreService = {
     const path = `assessments/${assessmentId}`;
     try {
       await deleteDoc(doc(db, 'assessments', assessmentId));
+    } catch (err) {
+      handleFirestoreError(err, OperationType.DELETE, path);
+    }
+  },
+
+  async deleteAssessmentsBatch(assessmentIds: string[]): Promise<void> {
+    if (!assessmentIds || assessmentIds.length === 0) return;
+    const path = `assessments (batch delete ${assessmentIds.length})`;
+    try {
+      // Process in batches of up to 400 docs
+      const chunkSize = 400;
+      for (let i = 0; i < assessmentIds.length; i += chunkSize) {
+        const chunk = assessmentIds.slice(i, i + chunkSize);
+        const batch = writeBatch(db);
+        for (const id of chunk) {
+          batch.delete(doc(db, 'assessments', id));
+        }
+        await batch.commit();
+      }
     } catch (err) {
       handleFirestoreError(err, OperationType.DELETE, path);
     }

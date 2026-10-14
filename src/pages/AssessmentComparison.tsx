@@ -83,14 +83,14 @@ export const AssessmentComparison: React.FC<Props> = ({ assessments, onBack }) =
   return (
     <div className="space-y-6 max-w-7xl mx-auto">
       {/* Header */}
-      <div className="bg-[#111827] border border-slate-800 rounded-2xl p-6 shadow-xl">
+      <div className="bg-[#111827] border border-slate-800 rounded-xl sm:rounded-2xl p-4 sm:p-6 shadow-xl">
         <div className="flex items-center gap-2 mb-1">
           <GitCompare className="w-5 h-5 text-cyan-400" />
-          <h2 className="text-xl font-bold text-white tracking-tight">
+          <h2 className="text-lg sm:text-xl font-bold text-white tracking-tight">
             Historical Assessment Diff &amp; Attack Surface Delta
           </h2>
         </div>
-        <p className="text-xs text-slate-400 mt-1 max-w-2xl">
+        <p className="text-xs text-slate-400 mt-1 max-w-2xl leading-relaxed">
           Compare two distinct reconnaissance runs across the same target scope to track newly exposed assets, decommissioned services, and configuration changes over time.
         </p>
 

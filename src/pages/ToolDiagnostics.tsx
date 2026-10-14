@@ -90,10 +90,10 @@ export const ToolDiagnostics: React.FC = () => {
   return (
     <div className="space-y-6 max-w-7xl mx-auto">
       {/* Header */}
-      <div className="bg-[#111827] border border-slate-800 rounded-2xl p-6 shadow-xl">
+      <div className="bg-[#111827] border border-slate-800 rounded-xl sm:rounded-2xl p-4 sm:p-6 shadow-xl">
         <div className="flex items-center gap-2 mb-1">
           <Wrench className="w-5 h-5 text-cyan-400" />
-          <h2 className="text-xl font-bold text-white tracking-tight">
+          <h2 className="text-lg sm:text-xl font-bold text-white tracking-tight">
             Security Tool Adapter Diagnostics &amp; Runtime Environment
           </h2>
         </div>
