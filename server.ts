@@ -2,6 +2,7 @@ import express from 'express';
 import type { Request, Response } from 'express';
 import path from 'path';
 import { fileURLToPath } from 'url';
+import fs from 'fs';
 import { GoogleGenAI } from '@google/genai';
 import dotenv from 'dotenv';
 
@@ -11,7 +12,30 @@ const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 
 const app = express();
-const PORT = process.env.PORT ? parseInt(process.env.PORT, 10) : 3000;
+
+const getPort = () => {
+  // 1. Explicit CLI argument --port
+  const portArgIndex = process.argv.indexOf('--port');
+  if (portArgIndex !== -1 && process.argv[portArgIndex + 1]) {
+    return parseInt(process.argv[portArgIndex + 1], 10);
+  }
+  // 2. Custom APP_PORT env var
+  if (process.env.APP_PORT) {
+    return parseInt(process.env.APP_PORT, 10);
+  }
+  // 3. AI Studio development environment has DEFAULT_APP_PORT=3000 while NGINX runs on 8080.
+  // In dev, the app MUST bind to DEFAULT_APP_PORT (3000) so NGINX can proxy to it.
+  if (process.env.NODE_ENV !== 'production' && process.env.DEFAULT_APP_PORT) {
+    return parseInt(process.env.DEFAULT_APP_PORT, 10);
+  }
+  // 4. Cloud Run production sets PORT (e.g. 8080). When published, the container must bind to PORT.
+  if (process.env.PORT) {
+    return parseInt(process.env.PORT, 10);
+  }
+  // 5. Default fallback to port 3000
+  return 3000;
+};
+const PORT = getPort();
 
 app.use(express.json({ limit: '10mb' }));
 
@@ -174,7 +198,11 @@ app.get('/api/health', (_req: Request, res: Response) => {
 
 // Start dev or production server
 async function startServer() {
-  if (process.env.NODE_ENV === 'production') {
+  const isProduction =
+    process.env.NODE_ENV === 'production' ||
+    (!process.env.DEFAULT_APP_PORT && fs.existsSync(path.resolve(__dirname, 'dist', 'index.html')));
+
+  if (isProduction) {
     app.use(express.static(path.resolve(__dirname, 'dist')));
     app.get('*', (_req: Request, res: Response) => {
       res.sendFile(path.resolve(__dirname, 'dist', 'index.html'));
@@ -189,7 +217,7 @@ async function startServer() {
   }
 
   app.listen(PORT, '0.0.0.0', () => {
-    console.log(`ReconX Server running on http://0.0.0.0:${PORT}`);
+    console.log(`ReconX Server running on http://0.0.0.0:${PORT} (mode: ${isProduction ? 'production' : 'development'})`);
   });
 }
 
