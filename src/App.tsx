@@ -13,32 +13,44 @@ import { AiAssistantPage } from './pages/AiAssistantPage';
 import { GeminiChatbot } from './components/chat/GeminiChatbot';
 import { firestoreService } from './services/firestoreService';
 import { Assessment } from './types';
-import { ShieldAlert, Shield, ArrowRight, Lock, CheckCircle2, UserPlus } from 'lucide-react';
+import { ShieldAlert, Shield, ArrowRight, UserPlus } from 'lucide-react';
 
 const ReconXMain: React.FC = () => {
-  const { user, profile, loading: authLoading, signInWithGoogle } = useAuth();
+  const { user, loading: authLoading } = useAuth();
   const [activePage, setActivePage] = useState<ActivePage>('dashboard');
   const [authView, setAuthView] = useState<'landing' | 'login' | 'signup'>('landing');
   const [assessments, setAssessments] = useState<Assessment[]>([]);
   const [selectedAssessmentId, setSelectedAssessmentId] = useState<string | null>(null);
   const [loadingAssessments, setLoadingAssessments] = useState(false);
+  const [seedingDemo, setSeedingDemo] = useState(false);
   const [searchQuery, setSearchQuery] = useState('');
+
+  // Reset workspace navigation state when operator session changes
+  const currentUid = user?.uid ?? null;
+  useEffect(() => {
+    setSelectedAssessmentId(null);
+    setActivePage('dashboard');
+    setSearchQuery('');
+    if (!currentUid) {
+      setAuthView('landing');
+    }
+  }, [currentUid]);
 
   // Fetch assessments when user is logged in
   useEffect(() => {
     let mounted = true;
     const fetchAssessments = async () => {
-      if (!user) {
+      if (!currentUid) {
         setAssessments([]);
         return;
       }
       setLoadingAssessments(true);
       try {
-        const list = await firestoreService.getAssessments(user.uid);
+        const list = await firestoreService.getAssessments(currentUid);
         if (mounted) {
           setAssessments(list);
-          if (list.length > 0 && !selectedAssessmentId) {
-            setSelectedAssessmentId(list[0].id);
+          if (list.length > 0) {
+            setSelectedAssessmentId((prev) => prev || list[0].id);
           }
         }
       } catch (err) {
@@ -52,7 +64,7 @@ const ReconXMain: React.FC = () => {
     return () => {
       mounted = false;
     };
-  }, [user]);
+  }, [currentUid]);
 
   const handleAssessmentCreated = async (newAssessment: Assessment) => {
     try {
@@ -62,6 +74,7 @@ const ReconXMain: React.FC = () => {
       setActivePage('detail');
     } catch (err) {
       console.error('Error creating assessment:', err);
+      throw err;
     }
   };
 
@@ -71,65 +84,73 @@ const ReconXMain: React.FC = () => {
 
   // Seed authorized OWASP Juice Shop lab fixture for coursework demonstration
   const handleSeedDemoLab = async () => {
-    const demoId = `demo_juiceshop_${Date.now()}`;
-    const demoAssessment: Assessment = {
-      id: demoId,
-      name: 'OWASP Juice Shop — Coursework Lab Recon',
-      clientName: 'Ethical Hacking Lab Environment',
-      description: 'Authorized baseline reconnaissance for university course demonstration.',
-      ownerId: user?.uid || 'guest_analyst',
-      ownerEmail: user?.email || 'operator@reconx.local',
-      type: 'mixed',
-      status: 'queued',
-      isDemo: true,
-      scope: {
-        rootDomain: 'juiceshop.lab.internal',
-        approvedHostnames: [
-          'api.juiceshop.lab.internal',
-          'auth.juiceshop.lab.internal',
-          'dev.juiceshop.lab.internal',
-          'staging.juiceshop.lab.internal',
-        ],
-        approvedIpsAndCidrs: ['10.14.0.0/24'],
-        permittedPorts: ['80', '443', '22', '3306', '8080'],
-        startDate: '2026-10-01',
-        endDate: '2026-11-01',
-        authorizationConfirmed: true,
-        authReference: 'COURSE-ETHICAL-HACK-LAB-01',
-        authorizedBy: user?.email || 'Professor / Course Director',
-      },
-      toolConfig: {
-        subfinder: true,
-        dnsx: true,
-        httpx: true,
-        nmap: true,
-        whatweb: true,
-        concurrency: 10,
-        rateLimit: 20,
-        timeoutSeconds: 30,
-        dnsRecordTypes: ['A', 'CNAME', 'MX', 'TXT'],
-        nmapProfile: 'quick',
-        executionEnvironment: 'lab_simulation',
-      },
-      stats: {
-        assetsCount: 0,
-        subdomainsCount: 0,
-        dnsRecordsCount: 0,
-        endpointsCount: 0,
-        servicesCount: 0,
-        technologiesCount: 0,
-        findingsCount: 0,
-      },
-      createdAt: new Date().toISOString(),
-      updatedAt: new Date().toISOString(),
-    };
+    if (seedingDemo) return;
+    setSeedingDemo(true);
+    try {
+      const demoId = `demo_juiceshop_${Date.now()}`;
+      const demoAssessment: Assessment = {
+        id: demoId,
+        name: 'OWASP Juice Shop — Coursework Lab Recon',
+        clientName: 'Ethical Hacking Lab Environment',
+        description: 'Authorized baseline reconnaissance for university course demonstration.',
+        ownerId: user?.uid || 'guest_analyst',
+        ownerEmail: user?.email || 'operator@reconx.local',
+        type: 'mixed',
+        status: 'queued',
+        isDemo: true,
+        scope: {
+          rootDomain: 'juiceshop.lab.internal',
+          approvedHostnames: [
+            'api.juiceshop.lab.internal',
+            'auth.juiceshop.lab.internal',
+            'dev.juiceshop.lab.internal',
+            'staging.juiceshop.lab.internal',
+          ],
+          approvedIpsAndCidrs: ['10.14.0.0/24'],
+          permittedPorts: ['80', '443', '22', '3306', '8080'],
+          startDate: '2026-10-01',
+          endDate: '2026-11-01',
+          authorizationConfirmed: true,
+          authReference: 'COURSE-ETHICAL-HACK-LAB-01',
+          authorizedBy: user?.email || 'Professor / Course Director',
+        },
+        toolConfig: {
+          subfinder: true,
+          dnsx: true,
+          httpx: true,
+          nmap: true,
+          whatweb: true,
+          concurrency: 10,
+          rateLimit: 20,
+          timeoutSeconds: 30,
+          dnsRecordTypes: ['A', 'CNAME', 'MX', 'TXT'],
+          nmapProfile: 'quick',
+          executionEnvironment: 'lab_simulation',
+        },
+        stats: {
+          assetsCount: 0,
+          subdomainsCount: 0,
+          dnsRecordsCount: 0,
+          endpointsCount: 0,
+          servicesCount: 0,
+          technologiesCount: 0,
+          findingsCount: 0,
+        },
+        createdAt: new Date().toISOString(),
+        updatedAt: new Date().toISOString(),
+      };
 
-    if (user) {
-      await firestoreService.createAssessment(demoAssessment);
+      if (user) {
+        await firestoreService.createAssessment(demoAssessment);
+      }
+      setAssessments((prev) => [demoAssessment, ...prev]);
+      setSelectedAssessmentId(demoAssessment.id);
+      setActivePage('detail');
+    } catch (err) {
+      console.error('Error seeding demo lab fixture:', err);
+    } finally {
+      setSeedingDemo(false);
     }
-    setAssessments((prev) => [demoAssessment, ...prev]);
-    setSelectedAssessmentId(demoAssessment.id);
-    setActivePage('detail');
   };
 
   const handleDeleteAssessments = async (ids: string[]) => {
@@ -139,13 +160,33 @@ const ReconXMain: React.FC = () => {
     setAssessments((prev) => prev.filter((a) => !ids.includes(a.id)));
     if (selectedAssessmentId && ids.includes(selectedAssessmentId)) {
       setSelectedAssessmentId(null);
+      if (activePage === 'detail') {
+        setActivePage('dashboard');
+      }
     }
   };
 
   const selectedAssessment = assessments.find((a) => a.id === selectedAssessmentId) || null;
 
+  // Show loading screen while resolving Firebase Auth state
+  if (authLoading) {
+    return (
+      <div className="min-h-screen bg-[#0B1020] text-slate-100 flex flex-col items-center justify-center gap-4 font-sans">
+        <div className="w-12 h-12 rounded-2xl bg-gradient-to-tr from-blue-600 to-cyan-500 flex items-center justify-center shadow-lg shadow-blue-500/25">
+          <ShieldAlert className="w-6 h-6 text-white animate-pulse" />
+        </div>
+        <div className="text-center space-y-1">
+          <div className="text-sm font-bold tracking-wider text-white">
+            RECON<span className="text-cyan-400">X</span>
+          </div>
+          <p className="text-xs font-mono text-slate-400">Initializing operator session...</p>
+        </div>
+      </div>
+    );
+  }
+
   // Unauthenticated routing: Landing, Login, or Signup
-  if (!user && !authLoading) {
+  if (!user) {
     if (authView === 'login') {
       return (
         <LoginPage
@@ -167,35 +208,35 @@ const ReconXMain: React.FC = () => {
     // Landing splash
     return (
       <div className="min-h-screen bg-[#0B1020] text-slate-100 flex flex-col justify-between selection:bg-blue-600 selection:text-white font-sans">
-        <header className="h-16 border-b border-slate-800/80 px-4 sm:px-6 flex items-center justify-between bg-[#111827]/80 backdrop-blur sticky top-0 z-20">
-          <div className="flex items-center gap-2.5 cursor-pointer" onClick={() => setAuthView('landing')}>
+        <header className="h-16 border-b border-slate-800/80 px-3 sm:px-6 flex items-center justify-between gap-2 bg-[#111827]/80 backdrop-blur sticky top-0 z-20">
+          <div className="flex items-center gap-2 cursor-pointer shrink-0" onClick={() => setAuthView('landing')}>
             <div className="w-8 h-8 rounded-lg bg-gradient-to-tr from-blue-600 to-cyan-500 flex items-center justify-center shadow-lg shadow-blue-500/20">
               <ShieldAlert className="w-5 h-5 text-white" />
             </div>
-            <span className="font-bold tracking-wider text-base text-white">
+            <span className="font-bold tracking-wider text-sm sm:text-base text-white">
               RECON<span className="text-cyan-400">X</span>
             </span>
           </div>
 
-          <div className="flex items-center gap-2 sm:gap-3">
+          <div className="flex items-center gap-1.5 sm:gap-3 shrink-0">
             <button
               onClick={() => setAuthView('login')}
-              className="px-3 sm:px-4 py-2 bg-blue-600 hover:bg-blue-500 text-white rounded-xl text-xs font-semibold shadow-md shadow-blue-500/20 transition-all cursor-pointer"
+              className="px-2.5 sm:px-4 py-1.5 sm:py-2 bg-blue-600 hover:bg-blue-500 text-white rounded-xl text-xs font-semibold shadow-md shadow-blue-500/20 transition-all cursor-pointer whitespace-nowrap"
             >
               Sign In
             </button>
             <button
               onClick={() => setAuthView('signup')}
-              className="px-3 sm:px-4 py-2 bg-slate-800 hover:bg-slate-700 text-cyan-400 border border-slate-700 rounded-xl text-xs font-semibold transition-all cursor-pointer flex items-center gap-1.5"
+              className="px-2.5 sm:px-4 py-1.5 sm:py-2 bg-slate-800 hover:bg-slate-700 text-cyan-400 border border-slate-700 rounded-xl text-xs font-semibold transition-all cursor-pointer flex items-center gap-1.5 whitespace-nowrap"
             >
-              <UserPlus className="w-3.5 h-3.5" />
+              <UserPlus className="w-3.5 h-3.5 shrink-0" />
               <span>Create Account</span>
             </button>
           </div>
         </header>
 
-        <div className="max-w-4xl mx-auto px-4 sm:px-6 py-10 sm:py-16 text-center space-y-5 sm:space-y-6">
-          <div className="inline-flex items-center gap-2 px-3 py-1 rounded-full bg-blue-500/10 border border-blue-500/30 text-blue-400 text-xs font-mono max-w-full truncate">
+        <div className="w-full min-w-0 max-w-4xl mx-auto px-4 sm:px-6 py-10 sm:py-16 text-center space-y-5 sm:space-y-6">
+          <div className="inline-flex items-center gap-2 px-3 py-1 rounded-full bg-blue-500/10 border border-blue-500/30 text-blue-400 text-[11px] sm:text-xs font-mono max-w-full overflow-hidden">
             <Shield className="w-3.5 h-3.5 shrink-0" />
             <span className="truncate">Ethical Hacking Coursework &amp; Reconnaissance Platform</span>
           </div>
@@ -309,6 +350,22 @@ const ReconXMain: React.FC = () => {
         />
       )}
 
+      {activePage === 'detail' && !selectedAssessment && (
+        <div className="max-w-xl mx-auto mt-12 p-8 bg-[#111827] border border-slate-800 rounded-2xl text-center space-y-4">
+          <Shield className="w-10 h-10 text-cyan-400 mx-auto" />
+          <h3 className="text-base font-semibold text-white">No Assessment Selected</h3>
+          <p className="text-xs text-slate-400">
+            Select an active assessment from the Dashboard or launch a new reconnaissance pipeline.
+          </p>
+          <button
+            onClick={() => setActivePage('dashboard')}
+            className="px-4 py-2 bg-blue-600 hover:bg-blue-500 text-white rounded-xl text-xs font-semibold cursor-pointer"
+          >
+            Return to Dashboard
+          </button>
+        </div>
+      )}
+
       {activePage === 'comparison' && (
         <AssessmentComparison
           assessments={assessments}
@@ -324,10 +381,7 @@ const ReconXMain: React.FC = () => {
         <AiAssistantPage
           currentAssessment={selectedAssessment}
           assessments={assessments}
-          onSelectAssessment={(id) => {
-            setSelectedAssessmentId(id);
-            setActivePage('detail');
-          }}
+          onSelectAssessment={(id) => setSelectedAssessmentId(id)}
         />
       )}
 

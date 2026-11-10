@@ -1,4 +1,4 @@
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useRef } from 'react';
 import {
   Assessment,
   Asset,
@@ -7,11 +7,11 @@ import {
   NetworkService,
   Finding,
   ScanJob,
-  AssetType,
   FindingSeverity
 } from '../types';
 import { scannerOrchestrator } from '../services/scannerEngine';
 import { firestoreService } from '../services/firestoreService';
+import { useAuth } from '../context/AuthContext';
 import { AttackSurfaceGraph } from '../components/graph/AttackSurfaceGraph';
 import {
   Globe,
@@ -25,20 +25,16 @@ import {
   FileText,
   Download,
   Search,
-  Filter,
-  CheckCircle2,
   AlertTriangle,
-  Clock,
   Terminal,
   ExternalLink,
   ChevronRight,
-  Code,
   Lock,
   Printer,
   FileDown,
   Flame,
-  LayoutGrid,
-  List
+  List,
+  Loader2
 } from 'lucide-react';
 import { generateAssessmentSummaryPdf } from '../services/pdfReportGenerator';
 import { SubdomainFindingsHeatmap } from '../components/heatmap/SubdomainFindingsHeatmap';
@@ -68,6 +64,7 @@ export const AssessmentDetail: React.FC<Props> = ({
   onUpdateAssessment,
   onBack,
 }) => {
+  const { user } = useAuth();
   const [activeTab, setActiveTab] = useState<DetailTab>('overview');
   const [findingsViewMode, setFindingsViewMode] = useState<'list' | 'heatmap'>('list');
   const [assets, setAssets] = useState<Asset[]>([]);
@@ -76,7 +73,7 @@ export const AssessmentDetail: React.FC<Props> = ({
   const [services, setServices] = useState<NetworkService[]>([]);
   const [findings, setFindings] = useState<Finding[]>([]);
   const [scanJobs, setScanJobs] = useState<ScanJob[]>([]);
-  const [selectedLogJob, setSelectedLogJob] = useState<ScanJob | null>(null);
+  const [selectedLogJobId, setSelectedLogJobId] = useState<string | null>(null);
 
   const [loadingData, setLoadingData] = useState(true);
   const [isScanning, setIsScanning] = useState(false);
@@ -87,112 +84,144 @@ export const AssessmentDetail: React.FC<Props> = ({
   const [dnsSearch, setDnsSearch] = useState('');
   const [findingSeverityFilter, setFindingSeverityFilter] = useState<string>('all');
 
-  // Load existing data from Firestore
+  const mountedRef = useRef(true);
+  const activeAssessmentIdRef = useRef(assessment.id);
+
   useEffect(() => {
-    let mounted = true;
-    const load = async () => {
-      setLoadingData(true);
-      try {
-        const [aList, dList, eList, sList, fList, jList] = await Promise.all([
-          firestoreService.getAssets(assessment.id),
-          firestoreService.getDnsRecords(assessment.id),
-          firestoreService.getWebEndpoints(assessment.id),
-          firestoreService.getNetworkServices(assessment.id),
-          firestoreService.getFindings(assessment.id),
-          firestoreService.getScanJobs(assessment.id),
-        ]);
-
-        if (mounted) {
-          setAssets(aList || []);
-          setDnsRecords(dList || []);
-          setEndpoints(eList || []);
-          setServices(sList || []);
-          setFindings(fList || []);
-          setScanJobs(jList || []);
-
-          // Auto-start scan if queued
-          if (assessment.status === 'queued' && !isScanning) {
-            handleStartScan();
-          }
-        }
-      } catch (err) {
-        console.error('Error loading assessment subcollections:', err);
-      } finally {
-        if (mounted) setLoadingData(false);
-      }
-    };
-    load();
-
+    mountedRef.current = true;
     return () => {
-      mounted = false;
+      mountedRef.current = false;
+      scannerOrchestrator.cancelScan();
     };
-  }, [assessment.id]);
+  }, []);
+
+  const recordAudit = (target: Assessment, action: string, details: string) => {
+    const ownerUid = user?.uid || target.ownerId;
+    if (!ownerUid || !user) return;
+    firestoreService
+      .addAuditLog({
+        id: `audit_${Date.now()}_${Math.random().toString(36).substring(2, 7)}`,
+        assessmentId: target.id,
+        ownerId: ownerUid,
+        actorEmail: user.email || target.ownerEmail || 'operator@reconx.local',
+        action,
+        details,
+        timestamp: new Date().toISOString(),
+      })
+      .catch((err) => console.error('Failed writing audit log:', err));
+  };
 
   // Start or resume scan pipeline
-  const handleStartScan = async () => {
+  const handleStartScan = async (targetAssessment: Assessment = assessment) => {
+    const targetId = targetAssessment.id;
+    const isStillActive = () => mountedRef.current && activeAssessmentIdRef.current === targetId;
+
     setIsScanning(true);
-    const updatedStatus: Assessment = { ...assessment, status: 'running' };
+    const updatedStatus: Assessment = { ...targetAssessment, status: 'running' };
     onUpdateAssessment(updatedStatus);
-    await firestoreService.updateAssessment(assessment.id, { status: 'running' });
+    recordAudit(
+      targetAssessment,
+      'SCAN_STARTED',
+      `Started ${targetAssessment.toolConfig.executionEnvironment} pipeline for ${targetAssessment.scope.rootDomain}`
+    );
+
+    if (user) {
+      firestoreService
+        .updateAssessment(targetId, { status: 'running' })
+        .catch((err) => console.error('Failed updating status to running:', err));
+    }
 
     try {
-      const results = await scannerOrchestrator.executePipeline(assessment, {
+      const results = await scannerOrchestrator.executePipeline(targetAssessment, {
         onJobUpdate: (job) => {
+          if (!isStillActive()) return;
+          const jobSnapshot: ScanJob = { ...job, logs: [...job.logs] };
           setScanJobs((prev) => {
-            const idx = prev.findIndex((j) => j.id === job.id);
+            const idx = prev.findIndex((j) => j.id === jobSnapshot.id);
             if (idx >= 0) {
               const copy = [...prev];
-              copy[idx] = job;
+              copy[idx] = jobSnapshot;
               return copy;
             }
-            return [...prev, job];
+            return [...prev, jobSnapshot];
           });
-          firestoreService.saveScanJob(job);
+          if (user) {
+            firestoreService
+              .saveScanJob(jobSnapshot)
+              .catch((err) => console.error('Failed saving scan job:', err));
+          }
         },
-        onLog: (tool, line) => {
-          // Log streaming
+        onLog: () => {
+          // Log streaming handled via job updates
         },
         onAssetsDiscovered: (newAssets) => {
+          if (!isStillActive()) return;
           setAssets((prev) => {
             const map = new Map(prev.map((a) => [a.id, a]));
             newAssets.forEach((a) => map.set(a.id, a));
             return Array.from(map.values());
           });
-          firestoreService.saveAssetsBatch(assessment.id, newAssets);
+          if (user) {
+            firestoreService
+              .saveAssetsBatch(targetId, newAssets)
+              .catch((err) => console.error('Failed saving assets batch:', err));
+          }
         },
         onDnsDiscovered: (newDns) => {
+          if (!isStillActive()) return;
           setDnsRecords((prev) => {
             const map = new Map(prev.map((d) => [d.id, d]));
             newDns.forEach((d) => map.set(d.id, d));
             return Array.from(map.values());
           });
-          firestoreService.saveDnsRecordsBatch(assessment.id, newDns);
+          if (user) {
+            firestoreService
+              .saveDnsRecordsBatch(targetId, newDns)
+              .catch((err) => console.error('Failed saving DNS batch:', err));
+          }
         },
         onEndpointsDiscovered: (newEps) => {
+          if (!isStillActive()) return;
           setEndpoints((prev) => {
             const map = new Map(prev.map((e) => [e.id, e]));
             newEps.forEach((e) => map.set(e.id, e));
             return Array.from(map.values());
           });
-          firestoreService.saveEndpointsBatch(assessment.id, newEps);
+          if (user) {
+            firestoreService
+              .saveEndpointsBatch(targetId, newEps)
+              .catch((err) => console.error('Failed saving endpoints batch:', err));
+          }
         },
         onServicesDiscovered: (newSvcs) => {
+          if (!isStillActive()) return;
           setServices((prev) => {
             const map = new Map(prev.map((s) => [s.id, s]));
             newSvcs.forEach((s) => map.set(s.id, s));
             return Array.from(map.values());
           });
-          firestoreService.saveServicesBatch(assessment.id, newSvcs);
+          if (user) {
+            firestoreService
+              .saveServicesBatch(targetId, newSvcs)
+              .catch((err) => console.error('Failed saving services batch:', err));
+          }
         },
         onFindingsGenerated: (newFindings) => {
+          if (!isStillActive()) return;
           setFindings((prev) => {
             const map = new Map(prev.map((f) => [f.id, f]));
             newFindings.forEach((f) => map.set(f.id, f));
             return Array.from(map.values());
           });
-          firestoreService.saveFindingsBatch(assessment.id, newFindings);
+          if (user) {
+            firestoreService
+              .saveFindingsBatch(targetId, newFindings)
+              .catch((err) => console.error('Failed saving findings batch:', err));
+          }
         },
       });
+
+      if (!isStillActive()) return;
 
       // Update assessment stats
       const finalStats = {
@@ -206,26 +235,107 @@ export const AssessmentDetail: React.FC<Props> = ({
       };
 
       const completedAssessment: Assessment = {
-        ...assessment,
+        ...targetAssessment,
         status: 'completed',
         stats: finalStats,
         updatedAt: new Date().toISOString(),
       };
       onUpdateAssessment(completedAssessment);
-      await firestoreService.updateAssessment(assessment.id, {
-        status: 'completed',
-        stats: finalStats,
-      });
+      recordAudit(
+        targetAssessment,
+        'SCAN_COMPLETED',
+        `Completed pipeline for ${targetAssessment.scope.rootDomain}: ${finalStats.assetsCount} assets, ${finalStats.findingsCount} findings`
+      );
+      if (user) {
+        await firestoreService
+          .updateAssessment(targetId, {
+            status: 'completed',
+            stats: finalStats,
+          })
+          .catch((err) => console.error('Failed updating completed assessment:', err));
+      }
     } catch (err: any) {
+      if (!isStillActive()) return;
       const isCancelled = err?.message?.includes('cancelled');
       const targetStatus = isCancelled ? 'cancelled' : 'failed';
-      const updatedStatus: Assessment = { ...assessment, status: targetStatus };
+      const updatedStatus: Assessment = { ...targetAssessment, status: targetStatus };
       onUpdateAssessment(updatedStatus);
-      await firestoreService.updateAssessment(assessment.id, { status: targetStatus });
+      recordAudit(
+        targetAssessment,
+        isCancelled ? 'SCAN_CANCELLED' : 'SCAN_FAILED',
+        `${isCancelled ? 'Cancelled' : 'Failed'} pipeline for ${targetAssessment.scope.rootDomain}: ${err?.message || 'Unknown error'}`
+      );
+      if (user) {
+        await firestoreService
+          .updateAssessment(targetId, { status: targetStatus })
+          .catch((updateErr) => console.error('Failed updating interrupted assessment status:', updateErr));
+      }
     } finally {
-      setIsScanning(false);
+      if (isStillActive()) {
+        setIsScanning(false);
+      }
     }
   };
+
+  // Load existing data from Firestore
+  useEffect(() => {
+    activeAssessmentIdRef.current = assessment.id;
+    let mounted = true;
+
+    // Reset per-assessment UI state when switching targets
+    setSelectedLogJobId(null);
+    setAssetSearch('');
+    setAssetTypeFilter('all');
+    setDnsSearch('');
+    setFindingSeverityFilter('all');
+    setAssets([]);
+    setDnsRecords([]);
+    setEndpoints([]);
+    setServices([]);
+    setFindings([]);
+    setScanJobs([]);
+    setIsScanning(false);
+
+    const load = async () => {
+      setLoadingData(true);
+      try {
+        const [aList, dList, eList, sList, fList, jList] = await Promise.all([
+          firestoreService.getAssets(assessment.id),
+          firestoreService.getDnsRecords(assessment.id),
+          firestoreService.getWebEndpoints(assessment.id),
+          firestoreService.getNetworkServices(assessment.id),
+          firestoreService.getFindings(assessment.id),
+          firestoreService.getScanJobs(assessment.id),
+        ]);
+
+        if (mounted && activeAssessmentIdRef.current === assessment.id) {
+          setAssets(aList || []);
+          setDnsRecords(dList || []);
+          setEndpoints(eList || []);
+          setServices(sList || []);
+          setFindings(fList || []);
+          setScanJobs(jList || []);
+
+          // Auto-start scan if queued
+          if (assessment.status === 'queued') {
+            handleStartScan(assessment);
+          }
+        }
+      } catch (err) {
+        console.error('Error loading assessment subcollections:', err);
+      } finally {
+        if (mounted && activeAssessmentIdRef.current === assessment.id) {
+          setLoadingData(false);
+        }
+      }
+    };
+    load();
+
+    return () => {
+      mounted = false;
+      scannerOrchestrator.cancelScan();
+    };
+  }, [assessment.id]);
 
   const handleCancelScan = () => {
     scannerOrchestrator.cancelScan();
@@ -251,17 +361,23 @@ export const AssessmentDetail: React.FC<Props> = ({
       rows = services.map((s) => [s.host, s.ip, s.port, s.protocol, s.state, s.serviceName, s.version || '']);
     }
 
-    const csvContent =
-      'data:text/csv;charset=utf-8,' +
-      [headers.join(','), ...rows.map((e) => e.map((x: any) => `"${String(x).replace(/"/g, '""')}"`).join(','))].join('\n');
+    const csvContent = [
+      headers.join(','),
+      ...rows.map((e) => e.map((x: any) => `"${String(x).replace(/"/g, '""')}"`).join(',')),
+    ].join('\r\n');
 
-    const encodedUri = encodeURI(csvContent);
+    const safeName = assessment.name.replace(/[^a-zA-Z0-9_-]/g, '_');
+    const blob = new Blob([csvContent], { type: 'text/csv;charset=utf-8;' });
+    const url = URL.createObjectURL(blob);
     const link = document.createElement('a');
-    link.setAttribute('href', encodedUri);
-    link.setAttribute('download', `reconx_${assessment.name}_${type}.csv`);
+    link.href = url;
+    link.download = `reconx_${safeName}_${type}.csv`;
     document.body.appendChild(link);
     link.click();
     document.body.removeChild(link);
+    URL.revokeObjectURL(url);
+
+    recordAudit(assessment, 'REPORT_EXPORTED', `Exported ${type.toUpperCase()} inventory CSV (${rows.length} rows)`);
   };
 
   const exportFullJson = () => {
@@ -281,8 +397,12 @@ export const AssessmentDetail: React.FC<Props> = ({
     const a = document.createElement('a');
     a.href = url;
     a.download = `reconx-assessment-${assessment.id}.json`;
+    document.body.appendChild(a);
     a.click();
+    document.body.removeChild(a);
     URL.revokeObjectURL(url);
+
+    recordAudit(assessment, 'REPORT_EXPORTED', `Exported complete raw JSON dataset for ${assessment.scope.rootDomain}`);
   };
 
   const handleDownloadSummaryPdf = () => {
@@ -291,7 +411,31 @@ export const AssessmentDetail: React.FC<Props> = ({
       findings,
       totalFindingsCount: assessment.stats?.findingsCount || findings.length,
     });
+    recordAudit(assessment, 'REPORT_EXPORTED', `Generated Summary PDF report for ${assessment.scope.rootDomain}`);
   };
+
+  const selectedLogJob = scanJobs.find((j) => j.id === selectedLogJobId) || scanJobs[0] || null;
+  const technologyAssets = assets.filter((a) => a.assetType === 'technology');
+  const filteredAssets = assets.filter((a) => {
+    if (assetTypeFilter !== 'all' && a.assetType !== assetTypeFilter) return false;
+    if (assetSearch && !a.canonicalName.toLowerCase().includes(assetSearch.toLowerCase())) {
+      return false;
+    }
+    return true;
+  });
+  const filteredDnsRecords = dnsRecords.filter((d) => {
+    if (
+      dnsSearch &&
+      !d.hostname.toLowerCase().includes(dnsSearch.toLowerCase()) &&
+      !d.value.toLowerCase().includes(dnsSearch.toLowerCase())
+    ) {
+      return false;
+    }
+    return true;
+  });
+  const filteredFindings = findings.filter(
+    (f) => findingSeverityFilter === 'all' || f.severity === findingSeverityFilter
+  );
 
   const getSeverityBadge = (sev: FindingSeverity) => {
     switch (sev) {
@@ -331,6 +475,11 @@ export const AssessmentDetail: React.FC<Props> = ({
                   DEMO LAB FIXTURE
                 </span>
               )}
+              {loadingData && (
+                <span className="inline-flex items-center gap-1 text-[10px] font-mono text-slate-400">
+                  <Loader2 className="w-3 h-3 animate-spin text-cyan-400" /> Syncing records...
+                </span>
+              )}
             </div>
 
             <h1 className="text-xl sm:text-2xl font-bold text-white tracking-tight flex flex-wrap items-center gap-2 sm:gap-2.5">
@@ -339,8 +488,12 @@ export const AssessmentDetail: React.FC<Props> = ({
                 className={`text-[11px] sm:text-xs px-2.5 py-0.5 rounded-full font-mono font-medium capitalize border ${
                   assessment.status === 'completed'
                     ? 'bg-emerald-500/10 text-emerald-400 border-emerald-500/30'
-                    : assessment.status === 'running'
+                    : assessment.status === 'running' || assessment.status === 'validating'
                     ? 'bg-cyan-500/10 text-cyan-400 border-cyan-500/30 animate-pulse'
+                    : assessment.status === 'queued'
+                    ? 'bg-amber-500/10 text-amber-400 border-amber-500/30'
+                    : assessment.status === 'failed'
+                    ? 'bg-rose-500/10 text-rose-400 border-rose-500/30'
                     : 'bg-slate-500/10 text-slate-400 border-slate-500/30'
                 }`}
               >
@@ -367,7 +520,7 @@ export const AssessmentDetail: React.FC<Props> = ({
               </button>
             ) : (
               <button
-                onClick={handleStartScan}
+                onClick={() => handleStartScan(assessment)}
                 className="flex items-center gap-1.5 px-3.5 py-2 bg-blue-600 hover:bg-blue-500 text-white rounded-xl text-xs font-semibold shadow-lg shadow-blue-600/20 transition-all cursor-pointer"
               >
                 <Play className="w-4 h-4" /> Re-Run Pipeline
@@ -485,7 +638,15 @@ export const AssessmentDetail: React.FC<Props> = ({
                 { name: 'WhatWeb', desc: 'Observable Tech Fingerprinting', enabled: assessment.toolConfig.whatweb },
               ].map((tool) => {
                 const job = scanJobs.find((j) => j.toolName === tool.name);
-                const status = job ? job.status : tool.enabled ? (isScanning ? 'running' : 'completed') : 'disabled';
+                const status = job
+                  ? job.status
+                  : tool.enabled
+                  ? isScanning
+                    ? 'queued'
+                    : assessment.status === 'cancelled'
+                    ? 'cancelled'
+                    : 'pending'
+                  : 'disabled';
 
                 return (
                   <div
@@ -501,6 +662,10 @@ export const AssessmentDetail: React.FC<Props> = ({
                               ? 'bg-emerald-500/10 text-emerald-400 border border-emerald-500/20'
                               : status === 'running'
                               ? 'bg-cyan-500/10 text-cyan-400 border border-cyan-500/20 animate-pulse'
+                              : status === 'queued'
+                              ? 'bg-amber-500/10 text-amber-400 border border-amber-500/20'
+                              : status === 'failed'
+                              ? 'bg-rose-500/10 text-rose-400 border border-rose-500/20'
                               : 'bg-slate-800 text-slate-500'
                           }`}
                         >
@@ -515,10 +680,10 @@ export const AssessmentDetail: React.FC<Props> = ({
                         <span>{job.durationMs}ms</span>
                         <button
                           onClick={() => {
-                            setSelectedLogJob(job);
+                            setSelectedLogJobId(job.id);
                             setActiveTab('logs');
                           }}
-                          className="text-cyan-400 hover:underline"
+                          className="text-cyan-400 hover:underline cursor-pointer"
                         >
                           Logs ({job.logs.length})
                         </button>
@@ -582,23 +747,31 @@ export const AssessmentDetail: React.FC<Props> = ({
               </div>
 
               <div className="space-y-2">
-                {findings.slice(0, 3).map((f) => (
-                  <div key={f.id} className="p-3 bg-slate-950 rounded-xl border border-slate-800/80">
-                    <div className="flex items-center justify-between mb-1">
-                      <span className="text-xs font-semibold text-white truncate max-w-[280px]">
-                        {f.title}
-                      </span>
-                      <span
-                        className={`text-[9px] px-2 py-0.5 rounded font-mono uppercase border ${getSeverityBadge(
-                          f.severity
-                        )}`}
-                      >
-                        {f.severity}
-                      </span>
-                    </div>
-                    <p className="text-[11px] text-slate-400 line-clamp-1">{f.description}</p>
+                {findings.length === 0 ? (
+                  <div className="p-6 bg-slate-950 rounded-xl border border-slate-800/80 text-center text-xs text-slate-500">
+                    {isScanning
+                      ? 'Collecting telemetry and correlating security observations...'
+                      : 'No observations or risk items recorded yet for this assessment.'}
                   </div>
-                ))}
+                ) : (
+                  findings.slice(0, 3).map((f) => (
+                    <div key={f.id} className="p-3 bg-slate-950 rounded-xl border border-slate-800/80">
+                      <div className="flex items-center justify-between mb-1">
+                        <span className="text-xs font-semibold text-white truncate max-w-[280px]">
+                          {f.title}
+                        </span>
+                        <span
+                          className={`text-[9px] px-2 py-0.5 rounded font-mono uppercase border ${getSeverityBadge(
+                            f.severity
+                          )}`}
+                        >
+                          {f.severity}
+                        </span>
+                      </div>
+                      <p className="text-[11px] text-slate-400 line-clamp-1">{f.description}</p>
+                    </div>
+                  ))
+                )}
               </div>
             </div>
           </div>
@@ -715,15 +888,16 @@ export const AssessmentDetail: React.FC<Props> = ({
                 </tr>
               </thead>
               <tbody className="divide-y divide-slate-800/60 text-slate-300 font-mono">
-                {assets
-                  .filter((a) => {
-                    if (assetTypeFilter !== 'all' && a.assetType !== assetTypeFilter) return false;
-                    if (assetSearch && !a.canonicalName.toLowerCase().includes(assetSearch.toLowerCase())) {
-                      return false;
-                    }
-                    return true;
-                  })
-                  .map((a) => (
+                {filteredAssets.length === 0 ? (
+                  <tr>
+                    <td colSpan={6} className="px-4 py-10 text-center text-slate-500 font-sans">
+                      {assets.length === 0
+                        ? 'No assets cataloged yet. Run the reconnaissance pipeline to populate inventory.'
+                        : 'No assets match the current filter criteria.'}
+                    </td>
+                  </tr>
+                ) : (
+                  filteredAssets.map((a) => (
                     <tr key={a.id} className="hover:bg-slate-800/30">
                       <td className="px-4 py-3 text-white font-medium break-all">{a.canonicalName}</td>
                       <td className="px-4 py-3">
@@ -736,7 +910,8 @@ export const AssessmentDetail: React.FC<Props> = ({
                       <td className="px-4 py-3 text-slate-500 text-[11px]">{new Date(a.firstSeen).toLocaleDateString()}</td>
                       <td className="px-4 py-3 text-slate-500 text-[11px]">{new Date(a.lastSeen).toLocaleDateString()}</td>
                     </tr>
-                  ))}
+                  ))
+                )}
               </tbody>
             </table>
           </div>
@@ -778,18 +953,16 @@ export const AssessmentDetail: React.FC<Props> = ({
                 </tr>
               </thead>
               <tbody className="divide-y divide-slate-800/60 text-slate-300">
-                {dnsRecords
-                  .filter((d) => {
-                    if (
-                      dnsSearch &&
-                      !d.hostname.toLowerCase().includes(dnsSearch.toLowerCase()) &&
-                      !d.value.toLowerCase().includes(dnsSearch.toLowerCase())
-                    ) {
-                      return false;
-                    }
-                    return true;
-                  })
-                  .map((d) => (
+                {filteredDnsRecords.length === 0 ? (
+                  <tr>
+                    <td colSpan={6} className="px-4 py-10 text-center text-slate-500 font-sans">
+                      {dnsRecords.length === 0
+                        ? 'No DNS answers collected yet.'
+                        : 'No DNS records match the search filter.'}
+                    </td>
+                  </tr>
+                ) : (
+                  filteredDnsRecords.map((d) => (
                     <tr key={d.id} className="hover:bg-slate-800/30">
                       <td className="px-4 py-3 text-cyan-300">{d.hostname}</td>
                       <td className="px-4 py-3">
@@ -802,7 +975,8 @@ export const AssessmentDetail: React.FC<Props> = ({
                       <td className="px-4 py-3 text-slate-400">{d.source}</td>
                       <td className="px-4 py-3 text-slate-500 text-[11px]">{new Date(d.timestamp).toLocaleTimeString()}</td>
                     </tr>
-                  ))}
+                  ))
+                )}
               </tbody>
             </table>
           </div>
@@ -834,38 +1008,46 @@ export const AssessmentDetail: React.FC<Props> = ({
                 </tr>
               </thead>
               <tbody className="divide-y divide-slate-800/60 text-slate-300">
-                {endpoints.map((e) => (
-                  <tr key={e.id} className="hover:bg-slate-800/30">
-                    <td className="px-4 py-3 text-cyan-300 font-semibold">{e.url}</td>
-                    <td className="px-4 py-3">
-                      <span
-                        className={`px-2 py-0.5 rounded text-[10px] font-bold ${
-                          e.statusCode === 200
-                            ? 'bg-emerald-500/20 text-emerald-300'
-                            : e.statusCode === 301 || e.statusCode === 302
-                            ? 'bg-blue-500/20 text-blue-300'
-                            : 'bg-amber-500/20 text-amber-300'
-                        }`}
-                      >
-                        {e.statusCode}
-                      </span>
-                    </td>
-                    <td className="px-4 py-3 text-white font-sans">{e.title}</td>
-                    <td className="px-4 py-3 text-slate-400">{e.ip}</td>
-                    <td className="px-4 py-3">
-                      <div className="flex flex-wrap gap-1">
-                        {e.technologies?.map((t, idx) => (
-                          <span
-                            key={idx}
-                            className="px-1.5 py-0.2 rounded text-[10px] bg-slate-800 text-slate-300 border border-slate-700"
-                          >
-                            {t}
-                          </span>
-                        ))}
-                      </div>
+                {endpoints.length === 0 ? (
+                  <tr>
+                    <td colSpan={5} className="px-4 py-10 text-center text-slate-500 font-sans">
+                      No HTTP/HTTPS web endpoints discovered yet. Enable httpx and execute the pipeline to probe targets.
                     </td>
                   </tr>
-                ))}
+                ) : (
+                  endpoints.map((e) => (
+                    <tr key={e.id} className="hover:bg-slate-800/30">
+                      <td className="px-4 py-3 text-cyan-300 font-semibold">{e.url}</td>
+                      <td className="px-4 py-3">
+                        <span
+                          className={`px-2 py-0.5 rounded text-[10px] font-bold ${
+                            e.statusCode === 200
+                              ? 'bg-emerald-500/20 text-emerald-300'
+                              : e.statusCode === 301 || e.statusCode === 302
+                              ? 'bg-blue-500/20 text-blue-300'
+                              : 'bg-amber-500/20 text-amber-300'
+                          }`}
+                        >
+                          {e.statusCode}
+                        </span>
+                      </td>
+                      <td className="px-4 py-3 text-white font-sans">{e.title}</td>
+                      <td className="px-4 py-3 text-slate-400">{e.ip}</td>
+                      <td className="px-4 py-3">
+                        <div className="flex flex-wrap gap-1">
+                          {e.technologies?.map((t, idx) => (
+                            <span
+                              key={idx}
+                              className="px-1.5 py-0.2 rounded text-[10px] bg-slate-800 text-slate-300 border border-slate-700"
+                            >
+                              {t}
+                            </span>
+                          ))}
+                        </div>
+                      </td>
+                    </tr>
+                  ))
+                )}
               </tbody>
             </table>
           </div>
@@ -904,29 +1086,37 @@ export const AssessmentDetail: React.FC<Props> = ({
                 </tr>
               </thead>
               <tbody className="divide-y divide-slate-800/60 text-slate-300">
-                {services.map((s) => (
-                  <tr key={s.id} className="hover:bg-slate-800/30">
-                    <td className="px-4 py-3 text-cyan-300">{s.host}</td>
-                    <td className="px-4 py-3 text-slate-400">{s.ip}</td>
-                    <td className="px-4 py-3 text-white font-bold">{s.port}</td>
-                    <td className="px-4 py-3 uppercase text-slate-400">{s.protocol}</td>
-                    <td className="px-4 py-3">
-                      <span
-                        className={`px-2 py-0.5 rounded text-[10px] font-bold uppercase ${
-                          s.state === 'open'
-                            ? 'bg-emerald-500/20 text-emerald-300 border border-emerald-500/40'
-                            : s.state === 'filtered'
-                            ? 'bg-amber-500/20 text-amber-300 border border-amber-500/40'
-                            : 'bg-slate-800 text-slate-500'
-                        }`}
-                      >
-                        {s.state}
-                      </span>
+                {services.length === 0 ? (
+                  <tr>
+                    <td colSpan={7} className="px-4 py-10 text-center text-slate-500 font-sans">
+                      No network services mapped yet.
                     </td>
-                    <td className="px-4 py-3 text-blue-300 font-semibold">{s.serviceName}</td>
-                    <td className="px-4 py-3 text-slate-300">{s.version || 'Version probe concealed'}</td>
                   </tr>
-                ))}
+                ) : (
+                  services.map((s) => (
+                    <tr key={s.id} className="hover:bg-slate-800/30">
+                      <td className="px-4 py-3 text-cyan-300">{s.host}</td>
+                      <td className="px-4 py-3 text-slate-400">{s.ip}</td>
+                      <td className="px-4 py-3 text-white font-bold">{s.port}</td>
+                      <td className="px-4 py-3 uppercase text-slate-400">{s.protocol}</td>
+                      <td className="px-4 py-3">
+                        <span
+                          className={`px-2 py-0.5 rounded text-[10px] font-bold uppercase ${
+                            s.state === 'open'
+                              ? 'bg-emerald-500/20 text-emerald-300 border border-emerald-500/40'
+                              : s.state === 'filtered'
+                              ? 'bg-amber-500/20 text-amber-300 border border-amber-500/40'
+                              : 'bg-slate-800 text-slate-500'
+                          }`}
+                        >
+                          {s.state}
+                        </span>
+                      </td>
+                      <td className="px-4 py-3 text-blue-300 font-semibold">{s.serviceName}</td>
+                      <td className="px-4 py-3 text-slate-300">{s.version || 'Version probe concealed'}</td>
+                    </tr>
+                  ))
+                )}
               </tbody>
             </table>
           </div>
@@ -943,10 +1133,13 @@ export const AssessmentDetail: React.FC<Props> = ({
             </p>
           </div>
 
-          <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4">
-            {assets
-              .filter((a) => a.assetType === 'technology')
-              .map((t) => (
+          {technologyAssets.length === 0 ? (
+            <div className="p-10 bg-slate-950 rounded-xl border border-slate-800 text-center text-xs text-slate-500">
+              No technology fingerprints recorded yet.
+            </div>
+          ) : (
+            <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4">
+              {technologyAssets.map((t) => (
                 <div key={t.id} className="p-4 bg-slate-950 rounded-xl border border-slate-800">
                   <div className="flex items-center justify-between mb-2">
                     <span className="font-semibold text-sm text-cyan-400">{t.canonicalName}</span>
@@ -966,7 +1159,8 @@ export const AssessmentDetail: React.FC<Props> = ({
                   </div>
                 </div>
               ))}
-          </div>
+            </div>
+          )}
         </div>
       )}
 
@@ -1032,56 +1226,60 @@ export const AssessmentDetail: React.FC<Props> = ({
                 setFindingsViewMode('list');
               }}
             />
+          ) : filteredFindings.length === 0 ? (
+            <div className="p-10 bg-slate-950 rounded-xl border border-slate-800 text-center text-xs text-slate-500">
+              {findings.length === 0
+                ? 'No security observations or findings recorded yet.'
+                : `No findings match severity "${findingSeverityFilter}".`}
+            </div>
           ) : (
             <div className="space-y-4">
-              {findings
-                .filter((f) => findingSeverityFilter === 'all' || f.severity === findingSeverityFilter)
-                .map((f) => (
-                  <div key={f.id} className="p-5 bg-slate-950 rounded-xl border border-slate-800 space-y-3">
-                    <div className="flex flex-wrap items-start justify-between gap-2">
-                      <div>
-                        <div className="flex items-center gap-2 mb-1">
-                          <span
-                            className={`text-[10px] px-2.5 py-0.5 rounded font-mono font-bold uppercase border ${getSeverityBadge(
-                              f.severity
-                            )}`}
-                          >
-                            {f.severity}
-                          </span>
-                          <span className="text-[10px] font-mono px-2 py-0.5 rounded bg-slate-800 text-slate-400">
-                            {f.verificationStatus.replace('_', ' ')}
-                          </span>
-                          <span className="text-[10px] text-slate-500 font-mono">
-                            Source: {f.sourceTool}
-                          </span>
-                        </div>
-                        <h4 className="text-sm font-semibold text-white">{f.title}</h4>
+              {filteredFindings.map((f) => (
+                <div key={f.id} className="p-5 bg-slate-950 rounded-xl border border-slate-800 space-y-3">
+                  <div className="flex flex-wrap items-start justify-between gap-2">
+                    <div>
+                      <div className="flex items-center gap-2 mb-1">
+                        <span
+                          className={`text-[10px] px-2.5 py-0.5 rounded font-mono font-bold uppercase border ${getSeverityBadge(
+                            f.severity
+                          )}`}
+                        >
+                          {f.severity}
+                        </span>
+                        <span className="text-[10px] font-mono px-2 py-0.5 rounded bg-slate-800 text-slate-400">
+                          {f.verificationStatus.replace('_', ' ')}
+                        </span>
+                        <span className="text-[10px] text-slate-500 font-mono">
+                          Source: {f.sourceTool}
+                        </span>
                       </div>
-
-                      <div className="text-xs font-mono text-cyan-300 bg-slate-900 px-2.5 py-1 rounded border border-slate-800">
-                        Asset: {f.assetRef}
-                      </div>
+                      <h4 className="text-sm font-semibold text-white">{f.title}</h4>
                     </div>
 
-                    <p className="text-xs text-slate-300 leading-relaxed">{f.description}</p>
-
-                    <div className="p-3 bg-slate-900/80 rounded-lg border border-slate-800/80 space-y-2 text-xs">
-                      <div>
-                        <span className="text-[11px] font-semibold text-slate-400 block uppercase font-mono">
-                          Evidence:
-                        </span>
-                        <p className="text-slate-300 font-mono text-[11px] mt-0.5">{f.evidence}</p>
-                      </div>
-
-                      <div className="pt-2 border-t border-slate-800">
-                        <span className="text-[11px] font-semibold text-emerald-400 block uppercase font-mono">
-                          Remediation &amp; Next Steps:
-                        </span>
-                        <p className="text-slate-300 text-[11px] mt-0.5">{f.remediation}</p>
-                      </div>
+                    <div className="text-xs font-mono text-cyan-300 bg-slate-900 px-2.5 py-1 rounded border border-slate-800">
+                      Asset: {f.assetRef}
                     </div>
                   </div>
-                ))}
+
+                  <p className="text-xs text-slate-300 leading-relaxed">{f.description}</p>
+
+                  <div className="p-3 bg-slate-900/80 rounded-lg border border-slate-800/80 space-y-2 text-xs">
+                    <div>
+                      <span className="text-[11px] font-semibold text-slate-400 block uppercase font-mono">
+                        Evidence:
+                      </span>
+                      <p className="text-slate-300 font-mono text-[11px] mt-0.5">{f.evidence}</p>
+                    </div>
+
+                    <div className="pt-2 border-t border-slate-800">
+                      <span className="text-[11px] font-semibold text-emerald-400 block uppercase font-mono">
+                        Remediation &amp; Next Steps:
+                      </span>
+                      <p className="text-slate-300 text-[11px] mt-0.5">{f.remediation}</p>
+                    </div>
+                  </div>
+                </div>
+              ))}
             </div>
           )}
         </div>
@@ -1101,36 +1299,52 @@ export const AssessmentDetail: React.FC<Props> = ({
 
           <div className="grid grid-cols-1 md:grid-cols-4 gap-4">
             <div className="md:col-span-1 space-y-2">
-              {scanJobs.map((j) => (
-                <button
-                  key={j.id}
-                  onClick={() => setSelectedLogJob(j)}
-                  className={`w-full text-left p-3 rounded-xl border text-xs transition-all ${
-                    (selectedLogJob?.id || scanJobs[0]?.id) === j.id
-                      ? 'bg-blue-600/15 border-blue-500 text-white'
-                      : 'bg-slate-950 border-slate-800 text-slate-400 hover:border-slate-700'
-                  }`}
-                >
-                  <div className="flex items-center justify-between">
-                    <span className="font-semibold text-white">{j.toolName}</span>
-                    <span className="font-mono text-[10px] text-emerald-400">RC: {j.returnCode}</span>
-                  </div>
-                  <div className="text-[10px] text-slate-500 mt-1">
-                    Duration: {j.durationMs}ms • {j.logs.length} lines
-                  </div>
-                </button>
-              ))}
+              {scanJobs.length === 0 ? (
+                <div className="p-4 bg-slate-950 rounded-xl border border-slate-800 text-xs text-slate-500">
+                  No tool jobs have executed yet.
+                </div>
+              ) : (
+                scanJobs.map((j) => (
+                  <button
+                    key={j.id}
+                    onClick={() => setSelectedLogJobId(j.id)}
+                    className={`w-full text-left p-3 rounded-xl border text-xs transition-all cursor-pointer ${
+                      selectedLogJob?.id === j.id
+                        ? 'bg-blue-600/15 border-blue-500 text-white'
+                        : 'bg-slate-950 border-slate-800 text-slate-400 hover:border-slate-700'
+                    }`}
+                  >
+                    <div className="flex items-center justify-between">
+                      <span className="font-semibold text-white">{j.toolName}</span>
+                      <span
+                        className={`font-mono text-[10px] ${
+                          j.returnCode === 0
+                            ? 'text-emerald-400'
+                            : j.returnCode === 130
+                            ? 'text-amber-400'
+                            : 'text-rose-400'
+                        }`}
+                      >
+                        RC: {j.returnCode}
+                      </span>
+                    </div>
+                    <div className="text-[10px] text-slate-500 mt-1">
+                      Duration: {j.durationMs}ms • {j.logs.length} lines
+                    </div>
+                  </button>
+                ))
+              )}
             </div>
 
             <div className="md:col-span-3 bg-slate-950 rounded-xl border border-slate-800 p-4 font-mono text-[11px] text-slate-300 max-h-[500px] overflow-y-auto">
               <div className="text-slate-500 pb-2 mb-2 border-b border-slate-800 flex justify-between">
                 <span>
-                  STREAM: {selectedLogJob?.toolName || scanJobs[0]?.toolName || 'Waiting'} (STDOUT / STDERR)
+                  STREAM: {selectedLogJob?.toolName || 'Waiting'} (STDOUT / STDERR)
                 </span>
-                <span>STATUS: {selectedLogJob?.status || scanJobs[0]?.status}</span>
+                <span>STATUS: {selectedLogJob?.status || 'idle'}</span>
               </div>
               <div className="space-y-1">
-                {(selectedLogJob?.logs || scanJobs[0]?.logs || ['No tool logs recorded yet.']).map((line, i) => (
+                {(selectedLogJob?.logs?.length ? selectedLogJob.logs : ['No tool logs recorded yet.']).map((line, i) => (
                   <div
                     key={i}
                     className={`leading-relaxed ${
@@ -1210,7 +1424,7 @@ export const AssessmentDetail: React.FC<Props> = ({
 
             {/* Executive Summary Section */}
             <div className="space-y-2">
-              <h4 className="text-sm font-semibold text-white uppercase tracking-wider font-mono text-cyan-300">
+              <h4 className="text-sm font-semibold uppercase tracking-wider font-mono text-cyan-300">
                 1. Executive Summary
               </h4>
               <p className="text-xs text-slate-300 leading-relaxed">
@@ -1227,20 +1441,20 @@ export const AssessmentDetail: React.FC<Props> = ({
 
             {/* Scope & Authorization */}
             <div className="space-y-2">
-              <h4 className="text-sm font-semibold text-white uppercase tracking-wider font-mono text-cyan-300">
+              <h4 className="text-sm font-semibold uppercase tracking-wider font-mono text-cyan-300">
                 2. Scope &amp; Legal Authorization
               </h4>
               <div className="p-3 bg-slate-900 rounded-lg text-xs font-mono space-y-1">
                 <div>Root Domain: {assessment.scope.rootDomain}</div>
-                <div>Permitted Ports: {assessment.scope.permittedPorts.join(', ')}</div>
+                <div>Permitted Ports: {assessment.scope.permittedPorts?.join(', ') || 'None specified'}</div>
                 <div>ROE Reference: {assessment.scope.authReference || 'Internal Ethical Hacking Coursework Lab'}</div>
-                <div>Authorization Certified: TRUE</div>
+                <div>Authorization Certified: {assessment.scope.authorizationConfirmed ? 'TRUE' : 'FALSE'}</div>
               </div>
             </div>
 
             {/* Discovered Inventory Summary */}
             <div className="space-y-2">
-              <h4 className="text-sm font-semibold text-white uppercase tracking-wider font-mono text-cyan-300">
+              <h4 className="text-sm font-semibold uppercase tracking-wider font-mono text-cyan-300">
                 3. Asset Inventory Breakdown
               </h4>
               <div className="grid grid-cols-2 sm:grid-cols-4 gap-2 text-xs font-mono">
@@ -1267,22 +1481,28 @@ export const AssessmentDetail: React.FC<Props> = ({
 
             {/* Key Observations */}
             <div className="space-y-2">
-              <h4 className="text-sm font-semibold text-white uppercase tracking-wider font-mono text-cyan-300">
+              <h4 className="text-sm font-semibold uppercase tracking-wider font-mono text-cyan-300">
                 4. Key Reconnaissance Observations &amp; Next Steps
               </h4>
               <div className="space-y-2">
-                {findings.map((f, idx) => (
-                  <div key={idx} className="p-3 bg-slate-900 rounded-lg border border-slate-800 text-xs">
-                    <div className="flex items-center justify-between mb-1">
-                      <span className="font-semibold text-white">{f.title}</span>
-                      <span className="font-mono text-[10px] text-amber-400 uppercase">[{f.severity}]</span>
-                    </div>
-                    <p className="text-slate-400 text-[11px] mb-2">{f.description}</p>
-                    <div className="text-[11px] text-emerald-400">
-                      <strong>Remediation:</strong> {f.remediation}
-                    </div>
+                {findings.length === 0 ? (
+                  <div className="p-4 bg-slate-900 rounded-lg border border-slate-800 text-xs text-slate-400">
+                    No observations cataloged for this report snapshot yet.
                   </div>
-                ))}
+                ) : (
+                  findings.map((f) => (
+                    <div key={f.id} className="p-3 bg-slate-900 rounded-lg border border-slate-800 text-xs">
+                      <div className="flex items-center justify-between mb-1">
+                        <span className="font-semibold text-white">{f.title}</span>
+                        <span className="font-mono text-[10px] text-amber-400 uppercase">[{f.severity}]</span>
+                      </div>
+                      <p className="text-slate-400 text-[11px] mb-2">{f.description}</p>
+                      <div className="text-[11px] text-emerald-400">
+                        <strong>Remediation:</strong> {f.remediation}
+                      </div>
+                    </div>
+                  ))
+                )}
               </div>
             </div>
 
@@ -1316,7 +1536,7 @@ export const AssessmentDetail: React.FC<Props> = ({
             </div>
             <div className="flex justify-between border-b border-slate-800 pb-2">
               <span className="text-slate-500">Permitted Ports:</span>
-              <span className="font-mono text-slate-200">{assessment.scope.permittedPorts.join(', ')}</span>
+              <span className="font-mono text-slate-200">{assessment.scope.permittedPorts?.join(', ') || 'None specified'}</span>
             </div>
             <div className="flex justify-between border-b border-slate-800 pb-2">
               <span className="text-slate-500">Engagement Window:</span>

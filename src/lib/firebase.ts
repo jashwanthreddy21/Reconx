@@ -1,15 +1,16 @@
 import { initializeApp, getApps, getApp } from 'firebase/app';
-import { getAuth, GoogleAuthProvider, signInWithPopup, signOut, onAuthStateChanged, User } from 'firebase/auth';
-import { initializeFirestore, getFirestore, doc, getDocFromServer } from 'firebase/firestore';
+import { getAuth, GoogleAuthProvider } from 'firebase/auth';
+import { initializeFirestore, getFirestore, doc, getDocFromServer, type Firestore } from 'firebase/firestore';
 import firebaseConfig from '../../firebase-applet-config.json';
 
 const app = getApps().length > 0 ? getApp() : initializeApp(firebaseConfig);
 
 // Initialize Firestore with long-polling to prevent 10s streaming timeout in dev proxy & iframe environments
-let firestoreDb;
+let firestoreDb: Firestore;
 try {
   firestoreDb = initializeFirestore(app, {
     experimentalForceLongPolling: true,
+    ignoreUndefinedProperties: true,
   }, firebaseConfig.firestoreDatabaseId);
 } catch {
   firestoreDb = getFirestore(app, firebaseConfig.firestoreDatabaseId);
@@ -68,10 +69,11 @@ export function handleFirestoreError(error: unknown, operationType: OperationTyp
 
 // Test connection on boot per Firebase skill requirement
 export async function testFirestoreConnection(): Promise<boolean> {
+  let timer: ReturnType<typeof setTimeout> | undefined;
   try {
-    const timeoutPromise = new Promise((_, reject) =>
-      setTimeout(() => reject(new Error('Connection check timed out')), 4000)
-    );
+    const timeoutPromise = new Promise((_, reject) => {
+      timer = setTimeout(() => reject(new Error('Connection check timed out')), 4000);
+    });
     await Promise.race([
       getDocFromServer(doc(db, 'test', 'connection')),
       timeoutPromise
@@ -83,5 +85,7 @@ export async function testFirestoreConnection(): Promise<boolean> {
     }
     // Any permission-denied is expected since 'test/connection' is protected
     return true;
+  } finally {
+    if (timer !== undefined) clearTimeout(timer);
   }
 }

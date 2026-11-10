@@ -1,4 +1,4 @@
-import React, { useState } from 'react';
+import React, { useState, useEffect } from 'react';
 import { useAuth } from '../context/AuthContext';
 import {
   ShieldAlert,
@@ -25,12 +25,24 @@ export const LoginPage: React.FC<LoginPageProps> = ({
 }) => {
   const { signInWithEmail, signInWithGoogle, resetPassword, authError, clearAuthError } = useAuth();
 
-  const [email, setEmail] = useState('');
+  const [email, setEmail] = useState(() => {
+    try {
+      return localStorage.getItem('reconx_last_email') || '';
+    } catch {
+      return '';
+    }
+  });
   const [password, setPassword] = useState('');
   const [showPassword, setShowPassword] = useState(false);
   const [rememberEmail, setRememberEmail] = useState(true);
   const [submitting, setSubmitting] = useState(false);
   const [localError, setLocalError] = useState<string | null>(null);
+
+  useEffect(() => {
+    clearAuthError();
+    // Clear stale auth error when switching to Login view
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
 
   // Password reset state
   const [showResetModal, setShowResetModal] = useState(false);
@@ -64,10 +76,14 @@ export const LoginPage: React.FC<LoginPageProps> = ({
     setSubmitting(true);
     try {
       await signInWithEmail(email, password);
-      if (rememberEmail) {
-        localStorage.setItem('reconx_last_email', email.trim());
-      } else {
-        localStorage.removeItem('reconx_last_email');
+      try {
+        if (rememberEmail) {
+          localStorage.setItem('reconx_last_email', email.trim());
+        } else {
+          localStorage.removeItem('reconx_last_email');
+        }
+      } catch {
+        // Ignore storage access errors
       }
     } catch (err: any) {
       setLocalError(err.message || 'Authentication failed. Please check credentials.');
@@ -326,7 +342,7 @@ export const LoginPage: React.FC<LoginPageProps> = ({
                 type="button"
                 onClick={handleGoogleSignIn}
                 disabled={submitting}
-                className="w-full py-2.5 px-4 bg-slate-800/80 hover:bg-slate-750 border border-slate-700 text-slate-200 rounded-xl text-xs sm:text-sm font-semibold transition-all cursor-pointer flex items-center justify-center gap-2.5 shadow-sm hover:border-slate-600 disabled:opacity-50"
+                className="w-full py-2.5 px-4 bg-slate-800/80 hover:bg-slate-700/80 border border-slate-700 text-slate-200 rounded-xl text-xs sm:text-sm font-semibold transition-all cursor-pointer flex items-center justify-center gap-2.5 shadow-sm hover:border-slate-600 disabled:opacity-50"
               >
                 <svg className="w-4 h-4" viewBox="0 0 24 24">
                   <path

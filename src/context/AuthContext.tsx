@@ -1,4 +1,4 @@
-import React, { createContext, useContext, useEffect, useState } from 'react';
+import React, { createContext, useContext, useEffect, useState, useRef } from 'react';
 import {
   User,
   onAuthStateChanged,
@@ -68,6 +68,7 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
   const [profile, setProfile] = useState<UserProfile | null>(null);
   const [loading, setLoading] = useState<boolean>(true);
   const [authError, setAuthError] = useState<string | null>(null);
+  const pendingSignupRef = useRef<{ email: string; displayName: string; role: UserRole } | null>(null);
 
   const clearAuthError = () => setAuthError(null);
 
@@ -78,17 +79,33 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
       setUser(currentUser);
       if (currentUser) {
         const isAdminEmail = currentUser.email?.toLowerCase() === 'cybersafe07@gmail.com';
-        const authoritativeRole: UserRole = isAdminEmail ? 'admin' : 'analyst';
+        const pending = pendingSignupRef.current;
+        const matchesPending =
+          pending && pending.email.toLowerCase() === (currentUser.email || '').toLowerCase();
+
+        const resolveRole = (existingRole?: UserRole): UserRole => {
+          if (isAdminEmail) return 'admin';
+          if (existingRole === 'viewer' || existingRole === 'analyst') return existingRole;
+          return 'analyst';
+        };
 
         try {
           let userProfile = await firestoreService.getUserProfile(currentUser.uid);
           if (!userProfile) {
+            const initialRole: UserRole = isAdminEmail
+              ? 'admin'
+              : matchesPending
+              ? resolveRole(pending.role)
+              : 'analyst';
             userProfile = {
               id: currentUser.uid,
               email: currentUser.email || 'operator@reconx.local',
-              displayName: currentUser.displayName || (isAdminEmail ? 'Security Administrator' : 'Security Analyst'),
+              displayName:
+                (matchesPending ? pending.displayName : '') ||
+                currentUser.displayName ||
+                (isAdminEmail ? 'Security Administrator' : 'Security Analyst'),
               photoURL: currentUser.photoURL || undefined,
-              role: authoritativeRole,
+              role: initialRole,
               createdAt: new Date().toISOString(),
             };
             try {
@@ -96,29 +113,40 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
             } catch (saveErr) {
               console.warn('Initial profile creation in Firestore skipped or permitted fallback:', saveErr);
             }
-          } else if (userProfile.role !== authoritativeRole) {
-            // Correct role mismatch so only specific credential is admin
-            userProfile = {
-              ...userProfile,
-              role: authoritativeRole,
-              updatedAt: new Date().toISOString(),
-            };
-            try {
-              await firestoreService.saveUserProfile(userProfile);
-            } catch (saveErr) {
-              console.warn('Role mismatch save in Firestore skipped or permitted fallback:', saveErr);
+          } else {
+            const expectedRole = resolveRole(userProfile.role);
+            if (userProfile.role !== expectedRole) {
+              // Correct role mismatch so only specific credential is admin while preserving viewer/analyst
+              userProfile = {
+                ...userProfile,
+                role: expectedRole,
+                updatedAt: new Date().toISOString(),
+              };
+              try {
+                await firestoreService.saveUserProfile(userProfile);
+              } catch (saveErr) {
+                console.warn('Role mismatch save in Firestore skipped or permitted fallback:', saveErr);
+              }
             }
           }
           setProfile(userProfile);
         } catch (err) {
           console.error('Error fetching/creating user profile:', err);
+          const fallbackRole: UserRole = isAdminEmail
+            ? 'admin'
+            : matchesPending
+            ? resolveRole(pending.role)
+            : 'analyst';
           // Fallback local profile if offline or permission restricted
           setProfile({
             id: currentUser.uid,
             email: currentUser.email || 'operator@reconx.local',
-            displayName: currentUser.displayName || (isAdminEmail ? 'Security Administrator' : 'Security Analyst'),
+            displayName:
+              (matchesPending ? pending.displayName : '') ||
+              currentUser.displayName ||
+              (isAdminEmail ? 'Security Administrator' : 'Security Analyst'),
             photoURL: currentUser.photoURL || undefined,
-            role: authoritativeRole,
+            role: fallbackRole,
             createdAt: new Date().toISOString(),
           });
         }
@@ -166,12 +194,20 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
     preferredRole: UserRole = 'analyst'
   ) => {
     setAuthError(null);
+    const trimmedEmail = email.trim();
+    const trimmedName = displayName.trim() || 'Security Operator';
+    const isAdminEmail = trimmedEmail.toLowerCase() === 'cybersafe07@gmail.com';
+    const assignedRole: UserRole = isAdminEmail ? 'admin' : (preferredRole === 'admin' ? 'analyst' : preferredRole);
+    pendingSignupRef.current = {
+      email: trimmedEmail,
+      displayName: trimmedName,
+      role: assignedRole,
+    };
+
     try {
-      const trimmedEmail = email.trim();
       const userCredential = await createUserWithEmailAndPassword(auth, trimmedEmail, password);
       const createdUser = userCredential.user;
 
-      const trimmedName = displayName.trim() || 'Security Operator';
       try {
         await updateFirebaseProfile(createdUser, {
           displayName: trimmedName,
@@ -179,9 +215,6 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
       } catch (profileErr) {
         console.warn('Could not update Firebase user displayName:', profileErr);
       }
-
-      const isAdminEmail = trimmedEmail.toLowerCase() === 'cybersafe07@gmail.com';
-      const assignedRole: UserRole = isAdminEmail ? 'admin' : (preferredRole === 'admin' ? 'analyst' : preferredRole);
 
       const initialProfile: UserProfile = {
         id: createdUser.uid,
@@ -202,6 +235,8 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
       const msg = formatAuthError(err);
       setAuthError(msg);
       throw new Error(msg);
+    } finally {
+      pendingSignupRef.current = null;
     }
   };
 

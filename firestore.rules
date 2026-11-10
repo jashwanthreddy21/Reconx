@@ -40,9 +40,14 @@ service cloud.firestore {
       allow list: if isAdmin();
       allow create: if (isOwner(userId) || isAdmin()) &&
         request.resource.data.email is string &&
-        request.resource.data.role in ['admin', 'analyst', 'viewer'];
+        (isAdmin()
+          ? request.resource.data.role in ['admin', 'analyst', 'viewer']
+          : request.resource.data.role in ['analyst', 'viewer']);
       allow update: if (isOwner(userId) || isAdmin()) &&
-        request.resource.data.role in ['admin', 'analyst', 'viewer'];
+        request.resource.data.email is string &&
+        (isAdmin()
+          ? request.resource.data.role in ['admin', 'analyst', 'viewer']
+          : request.resource.data.role in ['analyst', 'viewer']);
       allow delete: if isAdmin();
     }
 
@@ -65,7 +70,7 @@ service cloud.firestore {
       // Subcollection: assets
       match /assets/{assetId} {
         allow get: if isAssessmentOwner(assessmentId);
-        allow list: if isSignedIn() && (resource.data.ownerId == request.auth.uid || isAdmin());
+        allow list: if isAssessmentOwner(assessmentId);
         allow create: if isAssessmentOwner(assessmentId) &&
           request.resource.data.ownerId == request.auth.uid &&
           request.resource.data.assessmentId == assessmentId;
@@ -77,7 +82,7 @@ service cloud.firestore {
       // Subcollection: dns_records
       match /dns_records/{recordId} {
         allow get: if isAssessmentOwner(assessmentId);
-        allow list: if isSignedIn() && (resource.data.ownerId == request.auth.uid || isAdmin());
+        allow list: if isAssessmentOwner(assessmentId);
         allow create: if isAssessmentOwner(assessmentId) &&
           request.resource.data.ownerId == request.auth.uid &&
           request.resource.data.assessmentId == assessmentId;
@@ -89,7 +94,7 @@ service cloud.firestore {
       // Subcollection: web_endpoints
       match /web_endpoints/{endpointId} {
         allow get: if isAssessmentOwner(assessmentId);
-        allow list: if isSignedIn() && (resource.data.ownerId == request.auth.uid || isAdmin());
+        allow list: if isAssessmentOwner(assessmentId);
         allow create: if isAssessmentOwner(assessmentId) &&
           request.resource.data.ownerId == request.auth.uid &&
           request.resource.data.assessmentId == assessmentId;
@@ -101,7 +106,7 @@ service cloud.firestore {
       // Subcollection: services
       match /services/{serviceId} {
         allow get: if isAssessmentOwner(assessmentId);
-        allow list: if isSignedIn() && (resource.data.ownerId == request.auth.uid || isAdmin());
+        allow list: if isAssessmentOwner(assessmentId);
         allow create: if isAssessmentOwner(assessmentId) &&
           request.resource.data.ownerId == request.auth.uid &&
           request.resource.data.assessmentId == assessmentId;
@@ -113,7 +118,7 @@ service cloud.firestore {
       // Subcollection: findings
       match /findings/{findingId} {
         allow get: if isAssessmentOwner(assessmentId);
-        allow list: if isSignedIn() && (resource.data.ownerId == request.auth.uid || isAdmin());
+        allow list: if isAssessmentOwner(assessmentId);
         allow create: if isAssessmentOwner(assessmentId) &&
           request.resource.data.ownerId == request.auth.uid &&
           request.resource.data.assessmentId == assessmentId;
@@ -125,7 +130,7 @@ service cloud.firestore {
       // Subcollection: scan_jobs
       match /scan_jobs/{jobId} {
         allow get: if isAssessmentOwner(assessmentId);
-        allow list: if isSignedIn() && (resource.data.ownerId == request.auth.uid || isAdmin());
+        allow list: if isAssessmentOwner(assessmentId);
         allow create: if isAssessmentOwner(assessmentId) &&
           request.resource.data.ownerId == request.auth.uid &&
           request.resource.data.assessmentId == assessmentId;
@@ -137,7 +142,7 @@ service cloud.firestore {
       // Subcollection: audit_logs
       match /audit_logs/{logId} {
         allow get: if isAssessmentOwner(assessmentId);
-        allow list: if isSignedIn() && (resource.data.ownerId == request.auth.uid || isAdmin());
+        allow list: if isAssessmentOwner(assessmentId);
         allow create: if isAssessmentOwner(assessmentId) &&
           request.resource.data.ownerId == request.auth.uid;
         allow update: if false; // Audit logs are immutable

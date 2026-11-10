@@ -8,9 +8,8 @@ import {
   deleteDoc,
   query,
   where,
-  orderBy,
-  onSnapshot,
-  writeBatch
+  writeBatch,
+  type DocumentReference
 } from 'firebase/firestore';
 import { db, handleFirestoreError, OperationType } from '../lib/firebase';
 import {
@@ -24,6 +23,76 @@ import {
   AuditLog,
   UserProfile
 } from '../types';
+
+const BATCH_CHUNK_SIZE = 400;
+const DELETABLE_SUBCOLLECTIONS = [
+  'assets',
+  'dns_records',
+  'web_endpoints',
+  'services',
+  'findings',
+  'scan_jobs',
+] as const;
+
+function stripUndefined<T>(value: T): T {
+  if (Array.isArray(value)) {
+    return value.map((item) => stripUndefined(item)) as unknown as T;
+  }
+  if (value !== null && typeof value === 'object') {
+    const cleaned: Record<string, unknown> = {};
+    for (const [k, v] of Object.entries(value as Record<string, unknown>)) {
+      if (v !== undefined) {
+        cleaned[k] = stripUndefined(v);
+      }
+    }
+    return cleaned as T;
+  }
+  return value;
+}
+
+async function commitSetBatch<T extends { id: string }>(
+  assessmentId: string,
+  subcollectionName: string,
+  items: T[]
+): Promise<void> {
+  if (!items || items.length === 0) return;
+  const path = `assessments/${assessmentId}/${subcollectionName}`;
+  try {
+    for (let i = 0; i < items.length; i += BATCH_CHUNK_SIZE) {
+      const chunk = items.slice(i, i + BATCH_CHUNK_SIZE);
+      const batch = writeBatch(db);
+      for (const item of chunk) {
+        const ref = doc(db, 'assessments', assessmentId, subcollectionName, item.id);
+        batch.set(ref, stripUndefined(item), { merge: true });
+      }
+      await batch.commit();
+    }
+  } catch (err) {
+    handleFirestoreError(err, OperationType.WRITE, path);
+  }
+}
+
+async function deleteDocumentRefsInChunks(refs: DocumentReference[]): Promise<void> {
+  for (let i = 0; i < refs.length; i += BATCH_CHUNK_SIZE) {
+    const chunk = refs.slice(i, i + BATCH_CHUNK_SIZE);
+    const batch = writeBatch(db);
+    for (const ref of chunk) {
+      batch.delete(ref);
+    }
+    await batch.commit();
+  }
+}
+
+async function deleteAssessmentSubcollections(assessmentId: string): Promise<void> {
+  const refsToDelete: DocumentReference[] = [];
+  for (const sub of DELETABLE_SUBCOLLECTIONS) {
+    const snap = await getDocs(collection(db, 'assessments', assessmentId, sub));
+    snap.forEach((d) => refsToDelete.push(d.ref));
+  }
+  if (refsToDelete.length > 0) {
+    await deleteDocumentRefsInChunks(refsToDelete);
+  }
+}
 
 export const firestoreService = {
   // ----------------------------------------------------
@@ -43,7 +112,7 @@ export const firestoreService = {
   async saveUserProfile(profile: UserProfile): Promise<void> {
     const path = `users/${profile.id}`;
     try {
-      const dataToSave: Record<string, any> = {
+      const dataToSave: Record<string, unknown> = {
         id: profile.id,
         email: profile.email,
         displayName: profile.displayName || '',
@@ -92,7 +161,7 @@ export const firestoreService = {
   async createAssessment(assessment: Assessment): Promise<void> {
     const path = `assessments/${assessment.id}`;
     try {
-      await setDoc(doc(db, 'assessments', assessment.id), assessment);
+      await setDoc(doc(db, 'assessments', assessment.id), stripUndefined(assessment));
       await this.addAuditLog({
         id: `audit_${Date.now()}_${Math.random().toString(36).substring(2, 6)}`,
         assessmentId: assessment.id,
@@ -110,10 +179,10 @@ export const firestoreService = {
   async updateAssessment(assessmentId: string, updates: Partial<Assessment>): Promise<void> {
     const path = `assessments/${assessmentId}`;
     try {
-      await updateDoc(doc(db, 'assessments', assessmentId), {
+      await updateDoc(doc(db, 'assessments', assessmentId), stripUndefined({
         ...updates,
         updatedAt: new Date().toISOString(),
-      });
+      }));
     } catch (err) {
       handleFirestoreError(err, OperationType.UPDATE, path);
     }
@@ -122,6 +191,7 @@ export const firestoreService = {
   async deleteAssessment(assessmentId: string): Promise<void> {
     const path = `assessments/${assessmentId}`;
     try {
+      await deleteAssessmentSubcollections(assessmentId);
       await deleteDoc(doc(db, 'assessments', assessmentId));
     } catch (err) {
       handleFirestoreError(err, OperationType.DELETE, path);
@@ -132,16 +202,11 @@ export const firestoreService = {
     if (!assessmentIds || assessmentIds.length === 0) return;
     const path = `assessments (batch delete ${assessmentIds.length})`;
     try {
-      // Process in batches of up to 400 docs
-      const chunkSize = 400;
-      for (let i = 0; i < assessmentIds.length; i += chunkSize) {
-        const chunk = assessmentIds.slice(i, i + chunkSize);
-        const batch = writeBatch(db);
-        for (const id of chunk) {
-          batch.delete(doc(db, 'assessments', id));
-        }
-        await batch.commit();
+      for (const id of assessmentIds) {
+        await deleteAssessmentSubcollections(id);
       }
+      const docRefs = assessmentIds.map((id) => doc(db, 'assessments', id));
+      await deleteDocumentRefsInChunks(docRefs);
     } catch (err) {
       handleFirestoreError(err, OperationType.DELETE, path);
     }
@@ -163,17 +228,7 @@ export const firestoreService = {
   },
 
   async saveAssetsBatch(assessmentId: string, assets: Asset[]): Promise<void> {
-    const path = `assessments/${assessmentId}/assets`;
-    try {
-      const batch = writeBatch(db);
-      for (const a of assets) {
-        const ref = doc(db, 'assessments', assessmentId, 'assets', a.id);
-        batch.set(ref, a, { merge: true });
-      }
-      await batch.commit();
-    } catch (err) {
-      handleFirestoreError(err, OperationType.WRITE, path);
-    }
+    return commitSetBatch(assessmentId, 'assets', assets);
   },
 
   // ----------------------------------------------------
@@ -192,17 +247,7 @@ export const firestoreService = {
   },
 
   async saveDnsRecordsBatch(assessmentId: string, records: DnsRecord[]): Promise<void> {
-    const path = `assessments/${assessmentId}/dns_records`;
-    try {
-      const batch = writeBatch(db);
-      for (const r of records) {
-        const ref = doc(db, 'assessments', assessmentId, 'dns_records', r.id);
-        batch.set(ref, r, { merge: true });
-      }
-      await batch.commit();
-    } catch (err) {
-      handleFirestoreError(err, OperationType.WRITE, path);
-    }
+    return commitSetBatch(assessmentId, 'dns_records', records);
   },
 
   // ----------------------------------------------------
@@ -221,17 +266,7 @@ export const firestoreService = {
   },
 
   async saveEndpointsBatch(assessmentId: string, endpoints: WebEndpoint[]): Promise<void> {
-    const path = `assessments/${assessmentId}/web_endpoints`;
-    try {
-      const batch = writeBatch(db);
-      for (const ep of endpoints) {
-        const ref = doc(db, 'assessments', assessmentId, 'web_endpoints', ep.id);
-        batch.set(ref, ep, { merge: true });
-      }
-      await batch.commit();
-    } catch (err) {
-      handleFirestoreError(err, OperationType.WRITE, path);
-    }
+    return commitSetBatch(assessmentId, 'web_endpoints', endpoints);
   },
 
   // ----------------------------------------------------
@@ -250,17 +285,7 @@ export const firestoreService = {
   },
 
   async saveServicesBatch(assessmentId: string, services: NetworkService[]): Promise<void> {
-    const path = `assessments/${assessmentId}/services`;
-    try {
-      const batch = writeBatch(db);
-      for (const s of services) {
-        const ref = doc(db, 'assessments', assessmentId, 'services', s.id);
-        batch.set(ref, s, { merge: true });
-      }
-      await batch.commit();
-    } catch (err) {
-      handleFirestoreError(err, OperationType.WRITE, path);
-    }
+    return commitSetBatch(assessmentId, 'services', services);
   },
 
   // ----------------------------------------------------
@@ -279,17 +304,7 @@ export const firestoreService = {
   },
 
   async saveFindingsBatch(assessmentId: string, findings: Finding[]): Promise<void> {
-    const path = `assessments/${assessmentId}/findings`;
-    try {
-      const batch = writeBatch(db);
-      for (const f of findings) {
-        const ref = doc(db, 'assessments', assessmentId, 'findings', f.id);
-        batch.set(ref, f, { merge: true });
-      }
-      await batch.commit();
-    } catch (err) {
-      handleFirestoreError(err, OperationType.WRITE, path);
-    }
+    return commitSetBatch(assessmentId, 'findings', findings);
   },
 
   // ----------------------------------------------------
@@ -310,7 +325,7 @@ export const firestoreService = {
   async saveScanJob(job: ScanJob): Promise<void> {
     const path = `assessments/${job.assessmentId}/scan_jobs/${job.id}`;
     try {
-      await setDoc(doc(db, 'assessments', job.assessmentId, 'scan_jobs', job.id), job, { merge: true });
+      await setDoc(doc(db, 'assessments', job.assessmentId, 'scan_jobs', job.id), stripUndefined(job), { merge: true });
     } catch (err) {
       handleFirestoreError(err, OperationType.WRITE, path);
     }
@@ -335,7 +350,7 @@ export const firestoreService = {
     const path = log.assessmentId ? `assessments/${log.assessmentId}/audit_logs/${log.id}` : `audit_logs/${log.id}`;
     try {
       if (log.assessmentId) {
-        await setDoc(doc(db, 'assessments', log.assessmentId, 'audit_logs', log.id), log);
+        await setDoc(doc(db, 'assessments', log.assessmentId, 'audit_logs', log.id), stripUndefined(log));
       }
     } catch (err) {
       handleFirestoreError(err, OperationType.WRITE, path);

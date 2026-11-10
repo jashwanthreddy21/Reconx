@@ -3,27 +3,24 @@ import { Assessment, ScopeRule, ToolConfig, AssessmentType } from '../types';
 import { useAuth } from '../context/AuthContext';
 import {
   Shield,
-  CheckCircle,
   AlertTriangle,
   ArrowRight,
   ArrowLeft,
-  Server,
-  Globe,
-  Sliders,
   Check,
-  Terminal,
   FileCheck,
-  Lock
+  Lock,
+  Loader2,
 } from 'lucide-react';
 
 interface Props {
-  onAssessmentCreated: (assessment: Assessment) => void;
+  onAssessmentCreated: (assessment: Assessment) => Promise<void> | void;
   onCancel: () => void;
 }
 
 export const AssessmentWizard: React.FC<Props> = ({ onAssessmentCreated, onCancel }) => {
-  const { user, profile } = useAuth();
+  const { user } = useAuth();
   const [step, setStep] = useState<1 | 2 | 3 | 4 | 5>(1);
+  const [launching, setLaunching] = useState(false);
 
   // Form State
   const [name, setName] = useState('');
@@ -65,6 +62,43 @@ export const AssessmentWizard: React.FC<Props> = ({ onAssessmentCreated, onCance
   // Validation
   const [error, setError] = useState<string | null>(null);
 
+  const handleModeChange = (nextMode: AssessmentType) => {
+    setType(nextMode);
+    if (nextMode === 'passive') {
+      setTools((prev) => ({
+        ...prev,
+        subfinder: true,
+        dnsx: true,
+        httpx: false,
+        nmap: false,
+        whatweb: false,
+      }));
+    } else if (nextMode === 'active') {
+      setTools((prev) => ({
+        ...prev,
+        httpx: true,
+        nmap: true,
+        whatweb: true,
+      }));
+    } else {
+      setTools({
+        subfinder: true,
+        dnsx: true,
+        httpx: true,
+        nmap: true,
+        whatweb: true,
+      });
+    }
+  };
+
+  const toggleDnsType = (recordType: string) => {
+    setDnsTypes((prev) =>
+      prev.includes(recordType)
+        ? prev.filter((t) => t !== recordType)
+        : [...prev, recordType]
+    );
+  };
+
   const handleNext = () => {
     setError(null);
     if (step === 1) {
@@ -74,13 +108,19 @@ export const AssessmentWizard: React.FC<Props> = ({ onAssessmentCreated, onCance
       }
       setStep(2);
     } else if (step === 2) {
-      if (!rootDomain.trim()) {
+      const trimmedDomain = rootDomain.trim().toLowerCase();
+      if (!trimmedDomain) {
         setError('Root domain is required (e.g. example.com or lab.internal).');
         return;
       }
-      const domainRegex = /^[a-zA-Z0-9][a-zA-Z0-9-._]{1,253}\.[a-zA-Z]{2,}$|^[a-zA-Z0-9-_]+(\.[a-zA-Z0-9-_]+)*\.local$|^[a-zA-Z0-9-_]+(\.[a-zA-Z0-9-_]+)*\.internal$/;
-      if (!domainRegex.test(rootDomain.trim())) {
+      const fqdnLabel = '(?:[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?)';
+      const domainRegex = new RegExp(`^${fqdnLabel}(\\.${fqdnLabel})+$`, 'i');
+      if (!domainRegex.test(trimmedDomain)) {
         setError('Please enter a valid FQDN or lab root domain name (e.g., inlanefreight.com, juiceshop.lab.internal).');
+        return;
+      }
+      if (!startDate || !endDate || new Date(startDate) > new Date(endDate)) {
+        setError('Authorization end date must be on or after the start date.');
         return;
       }
       if (!authConfirmed) {
@@ -95,11 +135,16 @@ export const AssessmentWizard: React.FC<Props> = ({ onAssessmentCreated, onCance
       }
       setStep(4);
     } else if (step === 4) {
+      if (tools.dnsx && dnsTypes.length === 0) {
+        setError('Select at least one DNS record type when dnsx is enabled.');
+        return;
+      }
       setStep(5);
     }
   };
 
-  const handleLaunch = () => {
+  const handleLaunch = async () => {
+    if (launching) return;
     if (!authConfirmed) {
       setError('Explicit authorization confirmation is mandatory.');
       return;
@@ -170,7 +215,16 @@ export const AssessmentWizard: React.FC<Props> = ({ onAssessmentCreated, onCance
       updatedAt: new Date().toISOString(),
     };
 
-    onAssessmentCreated(newAssessment);
+    setLaunching(true);
+    setError(null);
+    try {
+      await onAssessmentCreated(newAssessment);
+    } catch (err: any) {
+      console.error('Failed to launch assessment:', err);
+      setError(err?.message || 'Failed to save assessment to Firestore. Please retry.');
+    } finally {
+      setLaunching(false);
+    }
   };
 
   return (
@@ -333,7 +387,7 @@ export const AssessmentWizard: React.FC<Props> = ({ onAssessmentCreated, onCance
               ].map((m) => (
                 <div
                   key={m.id}
-                  onClick={() => setType(m.id)}
+                  onClick={() => handleModeChange(m.id)}
                   className={`p-4 rounded-xl border cursor-pointer transition-all ${
                     type === m.id
                       ? 'bg-blue-600/15 border-blue-500 text-white'
@@ -640,6 +694,31 @@ export const AssessmentWizard: React.FC<Props> = ({ onAssessmentCreated, onCance
           </div>
 
           <div>
+            <label className="block text-xs font-medium text-slate-300 mb-2">
+              DNS Record Types to Query (dnsx)
+            </label>
+            <div className="flex flex-wrap gap-2">
+              {['A', 'AAAA', 'CNAME', 'MX', 'TXT', 'NS', 'SOA'].map((rtype) => {
+                const selected = dnsTypes.includes(rtype);
+                return (
+                  <button
+                    key={rtype}
+                    type="button"
+                    onClick={() => toggleDnsType(rtype)}
+                    className={`px-3 py-1.5 rounded-lg text-xs font-mono font-semibold border transition-all cursor-pointer ${
+                      selected
+                        ? 'bg-cyan-500/20 text-cyan-300 border-cyan-500/50'
+                        : 'bg-slate-950 text-slate-500 border-slate-800 hover:border-slate-700'
+                    }`}
+                  >
+                    {rtype}
+                  </button>
+                );
+              })}
+            </div>
+          </div>
+
+          <div>
             <label className="block text-xs font-medium text-slate-300 mb-1">
               Execution Environment Mode
             </label>
@@ -728,8 +807,9 @@ export const AssessmentWizard: React.FC<Props> = ({ onAssessmentCreated, onCance
       <div className="flex items-center justify-between pt-2">
         {step > 1 ? (
           <button
+            disabled={launching}
             onClick={() => setStep((s) => (s - 1) as any)}
-            className="flex items-center gap-1.5 px-4 py-2 bg-slate-800 hover:bg-slate-700 text-slate-200 rounded-xl text-xs font-medium transition-all"
+            className="flex items-center gap-1.5 px-4 py-2 bg-slate-800 hover:bg-slate-700 disabled:opacity-50 text-slate-200 rounded-xl text-xs font-medium transition-all cursor-pointer"
           >
             <ArrowLeft className="w-3.5 h-3.5" /> Back
           </button>
@@ -746,10 +826,19 @@ export const AssessmentWizard: React.FC<Props> = ({ onAssessmentCreated, onCance
           </button>
         ) : (
           <button
+            disabled={launching}
             onClick={handleLaunch}
-            className="flex items-center gap-2 px-6 py-2.5 bg-emerald-600 hover:bg-emerald-500 text-white rounded-xl text-xs font-semibold shadow-lg shadow-emerald-600/20 transition-all cursor-pointer"
+            className="flex items-center gap-2 px-6 py-2.5 bg-emerald-600 hover:bg-emerald-500 disabled:opacity-50 text-white rounded-xl text-xs font-semibold shadow-lg shadow-emerald-600/20 transition-all cursor-pointer"
           >
-            <FileCheck className="w-4 h-4" /> Launch Reconnaissance Scan
+            {launching ? (
+              <>
+                <Loader2 className="w-4 h-4 animate-spin" /> Launching Assessment...
+              </>
+            ) : (
+              <>
+                <FileCheck className="w-4 h-4" /> Launch Reconnaissance Scan
+              </>
+            )}
           </button>
         )}
       </div>

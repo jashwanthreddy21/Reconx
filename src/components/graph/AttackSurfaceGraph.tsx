@@ -8,17 +8,11 @@ import {
 } from '../../types';
 import {
   Globe,
-  Server,
-  Layers,
-  Cpu,
-  Shield,
   Search,
   ZoomIn,
   ZoomOut,
   Maximize2,
   Download,
-  Filter,
-  Info,
   X
 } from 'lucide-react';
 
@@ -28,8 +22,6 @@ interface GraphNode {
   type: AssetType;
   x: number;
   y: number;
-  vx?: number;
-  vy?: number;
   source: string;
   status?: string;
   details: Record<string, any>;
@@ -74,12 +66,12 @@ export const AttackSurfaceGraph: React.FC<Props> = ({
   });
 
   // Construct Nodes and Edges
-  const { nodes, edges } = useMemo(() => {
+  const { nodes, edges, nodeMap } = useMemo(() => {
     const rawNodes: GraphNode[] = [];
     const rawEdges: GraphEdge[] = [];
     const nodeMap = new Map<string, GraphNode>();
 
-    // 1. Root domains
+    // 1. Categorize assets
     const roots = assets.filter((a) => a.assetType === 'root_domain');
     const subdomains = assets.filter((a) => a.assetType === 'subdomain');
     const ips = assets.filter((a) => a.assetType === 'ip_address');
@@ -123,8 +115,14 @@ export const AttackSurfaceGraph: React.FC<Props> = ({
       rawNodes.push(node);
       nodeMap.set(node.id, node);
 
-      // Connect to root
-      const rootParent = roots[0];
+      // Connect to matching root domain
+      const lowerSub = s.canonicalName.toLowerCase();
+      const rootParent =
+        roots.find(
+          (r) =>
+            lowerSub === r.canonicalName.toLowerCase() ||
+            lowerSub.endsWith(`.${r.canonicalName.toLowerCase()}`)
+        ) || roots[0];
       if (rootParent) {
         rawEdges.push({
           id: `edge_sub_${s.id}`,
@@ -134,6 +132,19 @@ export const AttackSurfaceGraph: React.FC<Props> = ({
         });
       }
     });
+
+    const hostNodes = rawNodes.filter(
+      (n) => n.type === 'root_domain' || n.type === 'subdomain'
+    );
+    const hostNodesByLength = [...hostNodes].sort((a, b) => b.name.length - a.name.length);
+    const findHostNode = (hostname?: string) => {
+      if (!hostname) return undefined;
+      const clean = hostname.trim().toLowerCase();
+      return (
+        hostNodes.find((n) => n.name.toLowerCase() === clean) ||
+        hostNodesByLength.find((n) => clean.endsWith(`.${n.name.toLowerCase()}`))
+      );
+    };
 
     // IPs ring (Radius 300)
     ips.forEach((ip, i) => {
@@ -152,11 +163,17 @@ export const AttackSurfaceGraph: React.FC<Props> = ({
       rawNodes.push(node);
       nodeMap.set(node.id, node);
 
-      // Connect IP to relevant domain/subdomain based on DNS
-      const dnsA = dnsRecords.find((d) => d.recordType === 'A' && d.value === ip.canonicalName);
-      if (dnsA) {
-        const matchingDomain = rawNodes.find((n) => n.name === dnsA.hostname);
-        if (matchingDomain) {
+      // Connect IP to matching host(s) based on DNS A/AAAA records or parentHostname
+      const matchingDns = dnsRecords.filter(
+        (d) => (d.recordType === 'A' || d.recordType === 'AAAA') && d.value === ip.canonicalName
+      );
+      let connected = false;
+      const seenHosts = new Set<string>();
+      matchingDns.forEach((d) => {
+        const matchingDomain = findHostNode(d.hostname);
+        if (matchingDomain && !seenHosts.has(matchingDomain.id)) {
+          seenHosts.add(matchingDomain.id);
+          connected = true;
           rawEdges.push({
             id: `edge_res_${matchingDomain.id}_${ip.id}`,
             source: matchingDomain.id,
@@ -164,19 +181,29 @@ export const AttackSurfaceGraph: React.FC<Props> = ({
             type: 'RESOLVES_TO',
           });
         }
-      } else if (subdomains[0]) {
-        rawEdges.push({
-          id: `edge_res_def_${ip.id}`,
-          source: subdomains[0].id,
-          target: ip.id,
-          type: 'RESOLVES_TO',
-        });
+      });
+
+      if (!connected) {
+        const fallbackParent =
+          findHostNode(ip.parentHostname) ||
+          subdomains.find((s) => s.ipAddress === ip.canonicalName) ||
+          subdomains[0] ||
+          roots[0];
+        if (fallbackParent) {
+          rawEdges.push({
+            id: `edge_res_def_${fallbackParent.id}_${ip.id}`,
+            source: fallbackParent.id,
+            target: ip.id,
+            type: 'RESOLVES_TO',
+          });
+        }
       }
     });
 
-    // Endpoints ring (Radius 400)
-    eps.slice(0, 8).forEach((ep, i) => {
-      const angle = (i / Math.max(1, Math.min(8, eps.length))) * 2 * Math.PI + 0.6;
+    // Endpoints ring (Radius 390)
+    const displayedEps = eps.slice(0, 12);
+    displayedEps.forEach((ep, i) => {
+      const angle = (i / Math.max(1, displayedEps.length)) * 2 * Math.PI + 0.6;
       const radius = 390;
       const node: GraphNode = {
         id: ep.id,
@@ -191,8 +218,20 @@ export const AttackSurfaceGraph: React.FC<Props> = ({
       rawNodes.push(node);
       nodeMap.set(node.id, node);
 
-      // Connect to parent hostname or root
-      const parent = rawNodes.find((n) => ep.canonicalName.includes(n.name) && n.type !== 'endpoint') || roots[0];
+      const epRecord = endpoints.find((e) => e.url === ep.canonicalName);
+      let parsedHost = ep.parentHostname || epRecord?.hostname || '';
+      if (!parsedHost) {
+        try {
+          parsedHost = new URL(ep.canonicalName).hostname;
+        } catch {
+          parsedHost = '';
+        }
+      }
+
+      const parent =
+        findHostNode(parsedHost) ||
+        hostNodesByLength.find((n) => ep.canonicalName.toLowerCase().includes(n.name.toLowerCase())) ||
+        roots[0];
       if (parent) {
         rawEdges.push({
           id: `edge_serv_${node.id}_${parent.id}`,
@@ -203,9 +242,13 @@ export const AttackSurfaceGraph: React.FC<Props> = ({
       }
     });
 
-    // Services (Radius 470)
-    svcs.slice(0, 8).forEach((svc, i) => {
-      const angle = (i / Math.max(1, Math.min(8, svcs.length))) * 2 * Math.PI + 0.9;
+    const ipNodes = rawNodes.filter((n) => n.type === 'ip_address');
+    const epNodes = rawNodes.filter((n) => n.type === 'endpoint');
+
+    // Services ring (Radius 460)
+    const displayedSvcs = svcs.slice(0, 12);
+    displayedSvcs.forEach((svc, i) => {
+      const angle = (i / Math.max(1, displayedSvcs.length)) * 2 * Math.PI + 0.9;
       const radius = 460;
       const node: GraphNode = {
         id: svc.id,
@@ -220,20 +263,34 @@ export const AttackSurfaceGraph: React.FC<Props> = ({
       rawNodes.push(node);
       nodeMap.set(node.id, node);
 
-      const targetIp = ips[0] || roots[0];
-      if (targetIp) {
+      const svcRecord = services.find(
+        (s) =>
+          `${s.host}:${s.port}` === svc.canonicalName ||
+          `${s.ip}:${s.port}` === svc.canonicalName ||
+          `${s.serviceName} (${s.host}:${s.port})` === svc.canonicalName
+      );
+      const targetIpVal = svc.ipAddress || svcRecord?.ip;
+      const targetHostVal = svc.parentHostname || svcRecord?.host;
+
+      const targetParent =
+        (targetIpVal ? ipNodes.find((n) => n.name === targetIpVal) : undefined) ||
+        findHostNode(targetHostVal) ||
+        ipNodes[0] ||
+        roots[0];
+      if (targetParent) {
         rawEdges.push({
-          id: `edge_exp_${targetIp.id}_${node.id}`,
-          source: targetIp.id,
+          id: `edge_exp_${targetParent.id}_${node.id}`,
+          source: targetParent.id,
           target: node.id,
           type: 'EXPOSES',
         });
       }
     });
 
-    // Technologies (Radius 530)
-    techs.slice(0, 8).forEach((t, i) => {
-      const angle = (i / Math.max(1, Math.min(8, techs.length))) * 2 * Math.PI + 1.2;
+    // Technologies ring (Radius 530)
+    const displayedTechs = techs.slice(0, 12);
+    displayedTechs.forEach((t, i) => {
+      const angle = (i / Math.max(1, displayedTechs.length)) * 2 * Math.PI + 1.2;
       const radius = 530;
       const node: GraphNode = {
         id: t.id,
@@ -248,18 +305,25 @@ export const AttackSurfaceGraph: React.FC<Props> = ({
       rawNodes.push(node);
       nodeMap.set(node.id, node);
 
-      const targetEp = rawNodes.find((n) => n.type === 'endpoint') || roots[0];
-      if (targetEp) {
+      const hostParent = findHostNode(t.parentHostname);
+      const matchingEp =
+        (t.parentHostname
+          ? epNodes.find((e) => e.name.toLowerCase().includes(t.parentHostname!.toLowerCase()))
+          : undefined) ||
+        epNodes[0];
+
+      const targetParent = matchingEp || hostParent || roots[0];
+      if (targetParent) {
         rawEdges.push({
-          id: `edge_tech_${targetEp.id}_${node.id}`,
-          source: targetEp.id,
+          id: `edge_tech_${targetParent.id}_${node.id}`,
+          source: targetParent.id,
           target: node.id,
           type: 'USES_TECHNOLOGY',
         });
       }
     });
 
-    return { nodes: rawNodes, edges: rawEdges };
+    return { nodes: rawNodes, edges: rawEdges, nodeMap };
   }, [assets, dnsRecords, endpoints, services]);
 
   // Filtered nodes
@@ -279,12 +343,28 @@ export const AttackSurfaceGraph: React.FC<Props> = ({
     return edges.filter((e) => visibleNodeIds.has(e.source) && visibleNodeIds.has(e.target));
   }, [edges, visibleNodeIds]);
 
-  // Mouse wheel zoom
-  const handleWheel = (e: React.WheelEvent) => {
-    e.preventDefault();
-    const delta = e.deltaY > 0 ? 0.9 : 1.1;
-    setZoom((prev) => Math.min(Math.max(0.4, prev * delta), 3.0));
-  };
+  // Native non-passive wheel listener to allow zoom without page scrolling
+  useEffect(() => {
+    const el = containerRef.current;
+    if (!el) return;
+    const onWheel = (e: WheelEvent) => {
+      e.preventDefault();
+      const delta = e.deltaY > 0 ? 0.9 : 1.1;
+      setZoom((prev) => Math.min(Math.max(0.4, prev * delta), 3.0));
+    };
+    el.addEventListener('wheel', onWheel, { passive: false });
+    return () => {
+      el.removeEventListener('wheel', onWheel);
+    };
+  }, []);
+
+  // Release drag state even if pointer leaves the viewport
+  useEffect(() => {
+    if (!isDragging) return;
+    const onWindowMouseUp = () => setIsDragging(false);
+    window.addEventListener('mouseup', onWindowMouseUp);
+    return () => window.removeEventListener('mouseup', onWindowMouseUp);
+  }, [isDragging]);
 
   const handleMouseDown = (e: React.MouseEvent) => {
     if ((e.target as HTMLElement).tagName === 'svg' || (e.target as HTMLElement).tagName === 'rect') {
@@ -318,7 +398,9 @@ export const AttackSurfaceGraph: React.FC<Props> = ({
     const a = document.createElement('a');
     a.href = url;
     a.download = `reconx-graph-${Date.now()}.json`;
+    document.body.appendChild(a);
     a.click();
+    document.body.removeChild(a);
     URL.revokeObjectURL(url);
   };
 
@@ -338,25 +420,6 @@ export const AttackSurfaceGraph: React.FC<Props> = ({
         return '#EC4899'; // Pink
       default:
         return '#6B7280';
-    }
-  };
-
-  const getNodeIcon = (type: AssetType) => {
-    switch (type) {
-      case 'root_domain':
-        return Globe;
-      case 'subdomain':
-        return Globe;
-      case 'ip_address':
-        return Server;
-      case 'endpoint':
-        return Layers;
-      case 'service':
-        return Cpu;
-      case 'technology':
-        return Shield;
-      default:
-        return Info;
     }
   };
 
@@ -437,21 +500,26 @@ export const AttackSurfaceGraph: React.FC<Props> = ({
       {/* SVG Interactive Canvas */}
       <div
         ref={containerRef}
-        onWheel={handleWheel}
         onMouseDown={handleMouseDown}
         onMouseMove={handleMouseMove}
         onMouseUp={handleMouseUp}
+        onMouseLeave={handleMouseUp}
         className="w-full h-full cursor-grab active:cursor-grabbing"
       >
+        {nodes.length === 0 && (
+          <div className="absolute inset-0 flex flex-col items-center justify-center pointer-events-none z-0 px-6 text-center">
+            <Globe className="w-10 h-10 text-slate-700 mb-3" />
+            <p className="text-sm font-semibold text-slate-400">No Attack Surface Topology Yet</p>
+            <p className="text-xs text-slate-500 mt-1 max-w-md">
+              Launch the assessment scanner to discover root domains, subdomains, resolved IPs, endpoints, services, and technologies.
+            </p>
+          </div>
+        )}
         <svg className="w-full h-full">
           <defs>
             <pattern id="grid" width="40" height="40" patternUnits="userSpaceOnUse">
               <path d="M 40 0 L 0 0 0 40" fill="none" stroke="#1e293b" strokeWidth="0.5" />
             </pattern>
-            {/* Glow filters */}
-            <filter id="glow-blue" x="-20%" y="-20%" width="140%" height="140%">
-              <feDropShadow dx="0" dy="0" stdDeviation="4" floodColor="#3B82F6" floodOpacity="0.6" />
-            </filter>
             <filter id="glow-cyan" x="-20%" y="-20%" width="140%" height="140%">
               <feDropShadow dx="0" dy="0" stdDeviation="4" floodColor="#22D3EE" floodOpacity="0.6" />
             </filter>
@@ -469,8 +537,8 @@ export const AttackSurfaceGraph: React.FC<Props> = ({
 
             {/* Edges */}
             {filteredEdges.map((e) => {
-              const src = nodes.find((n) => n.id === e.source);
-              const tgt = nodes.find((n) => n.id === e.target);
+              const src = nodeMap.get(e.source);
+              const tgt = nodeMap.get(e.target);
               if (!src || !tgt) return null;
 
               const isHighlighted =

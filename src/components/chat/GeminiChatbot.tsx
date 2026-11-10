@@ -1,6 +1,5 @@
 import React, { useState, useRef, useEffect } from 'react';
 import {
-  MessageSquare,
   Bot,
   User,
   Send,
@@ -14,11 +13,8 @@ import {
   Trash2,
   Copy,
   Check,
-  ChevronDown,
   RefreshCw,
-  ExternalLink,
   Target,
-  Info,
 } from 'lucide-react';
 import { Assessment } from '../../types';
 
@@ -94,13 +90,16 @@ export const GeminiChatbot: React.FC<GeminiChatbotProps> = ({
   const effectiveOpen = isOpen !== undefined ? isOpen : internalOpen;
   const [selectedRoleKey, setSelectedRoleKey] = useState<ChatRoleKey>('security_analyst');
   const [messages, setMessages] = useState<ChatMessage[]>(() => {
-    const saved = localStorage.getItem('reconx_gemini_chat_history');
-    if (saved) {
-      try {
-        return JSON.parse(saved);
-      } catch {
-        // Fallback to initial greeting
+    try {
+      const saved = localStorage.getItem('reconx_gemini_chat_history');
+      if (saved) {
+        const parsed = JSON.parse(saved);
+        if (Array.isArray(parsed) && parsed.length > 0) {
+          return parsed;
+        }
       }
+    } catch {
+      // Fallback to initial greeting
     }
     return [
       {
@@ -135,27 +134,38 @@ Select an operational role above or ask anything about your reconnaissance workf
 
   // Save conversation history to local storage
   useEffect(() => {
-    localStorage.setItem('reconx_gemini_chat_history', JSON.stringify(messages));
+    try {
+      localStorage.setItem('reconx_gemini_chat_history', JSON.stringify(messages));
+    } catch {
+      // Ignore storage quota errors
+    }
   }, [messages]);
 
   // Scroll to bottom on new messages
   useEffect(() => {
-    if (isOpen) {
+    if (effectiveOpen) {
       messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' });
     }
-  }, [messages, isOpen]);
+  }, [messages, effectiveOpen]);
 
   // Focus textarea when opened
   useEffect(() => {
-    if (isOpen) {
-      setTimeout(() => textareaRef.current?.focus(), 150);
+    if (effectiveOpen) {
+      const timer = setTimeout(() => textareaRef.current?.focus(), 150);
+      return () => clearTimeout(timer);
     }
-  }, [isOpen]);
+  }, [effectiveOpen]);
 
-  const handleCopyText = (text: string, id: string) => {
-    navigator.clipboard.writeText(text);
-    setCopiedId(id);
-    setTimeout(() => setCopiedId(null), 2000);
+  const handleCopyText = async (text: string, id: string) => {
+    try {
+      if (navigator.clipboard?.writeText) {
+        await navigator.clipboard.writeText(text);
+        setCopiedId(id);
+        setTimeout(() => setCopiedId(null), 2000);
+      }
+    } catch (err) {
+      console.error('Clipboard copy failed:', err);
+    }
   };
 
   const handleClearHistory = () => {
@@ -208,10 +218,17 @@ Select an operational role above or ask anything about your reconnaissance workf
             }
           : undefined;
 
+      const historyForApi = nextMessages.filter(
+        (m) =>
+          m.id !== 'initial-greeting' &&
+          !m.id.startsWith('greeting-') &&
+          !m.id.startsWith('err-')
+      );
+
       const payload = {
         role: activeRole.key,
         model: activeRole.model,
-        messages: nextMessages.map((m) => ({
+        messages: historyForApi.map((m) => ({
           role: m.role,
           text: m.text,
         })),
@@ -224,7 +241,7 @@ Select an operational role above or ask anything about your reconnaissance workf
         body: JSON.stringify(payload),
       });
 
-      const data = await res.json();
+      const data = await res.json().catch(() => ({}));
 
       if (!res.ok || data.error) {
         throw new Error(data.error || `HTTP ${res.status}: Server request failed`);
@@ -275,7 +292,7 @@ Select an operational role above or ask anything about your reconnaissance workf
     },
     {
       label: 'Scope Triage Summary',
-      query: currentAssessment
+      query: currentAssessment?.scope?.rootDomain
         ? `Review the target scope for ${currentAssessment.scope.rootDomain} and summarize the key reconnaissance risks and verification steps.`
         : 'How do you structure an authorized reconnaissance report for an enterprise client?',
     },
@@ -285,7 +302,29 @@ Select an operational role above or ask anything about your reconnaissance workf
     },
   ];
 
-  // Helper to format basic markdown-style text (bold, backticks, bullet lines)
+  const formatInlineMarkdown = (text: string) =>
+    text.split(/(`[^`]+`|\*\*[^*]+\*\*)/g).map((part, i) => {
+      if (part.startsWith('`') && part.endsWith('`')) {
+        return (
+          <code
+            key={i}
+            className="px-1.5 py-0.5 rounded bg-slate-900 border border-slate-700 font-mono text-[11px] text-cyan-300"
+          >
+            {part.slice(1, -1)}
+          </code>
+        );
+      }
+      if (part.startsWith('**') && part.endsWith('**')) {
+        return (
+          <strong key={i} className="font-semibold text-white">
+            {part.slice(2, -2)}
+          </strong>
+        );
+      }
+      return part;
+    });
+
+  // Helper to format basic markdown-style text (bold, backticks, headings, code blocks, bullet lines)
   const renderFormattedContent = (content: string) => {
     const lines = content.split('\n');
     let inCodeBlock = false;
@@ -317,45 +356,31 @@ Select an operational role above or ask anything about your reconnaissance workf
         return;
       }
 
-      // Format inline bold and code
-      const formattedLine = line.split(/(`[^`]+`|\*\*[^*]+\*\*)/g).map((part, i) => {
-        if (part.startsWith('`') && part.endsWith('`')) {
-          return (
-            <code
-              key={i}
-              className="px-1.5 py-0.5 rounded bg-slate-900 border border-slate-700 font-mono text-[11px] text-cyan-300"
-            >
-              {part.slice(1, -1)}
-            </code>
-          );
-        }
-        if (part.startsWith('**') && part.endsWith('**')) {
-          return (
-            <strong key={i} className="font-semibold text-white">
-              {part.slice(2, -2)}
-            </strong>
-          );
-        }
-        return part;
-      });
-
       if (line.startsWith('- ') || line.startsWith('* ')) {
         elements.push(
           <div key={lineIndex} className="flex items-start gap-2 my-0.5 pl-1">
             <span className="text-cyan-400 mt-1 leading-none">•</span>
-            <span className="text-slate-300 leading-relaxed text-xs">{formattedLine.slice(1)}</span>
+            <span className="text-slate-300 leading-relaxed text-xs">
+              {formatInlineMarkdown(line.slice(2))}
+            </span>
           </div>
         );
       } else if (line.startsWith('### ')) {
         elements.push(
-          <h4 key={lineIndex} className="font-semibold text-white text-xs mt-2 mb-1 text-cyan-300">
-            {line.replace('### ', '')}
+          <h4 key={lineIndex} className="font-semibold text-xs mt-2 mb-1 text-cyan-300">
+            {formatInlineMarkdown(line.slice(4))}
           </h4>
         );
       } else if (line.startsWith('## ')) {
         elements.push(
-          <h3 key={lineIndex} className="font-bold text-white text-sm mt-2.5 mb-1 text-cyan-200">
-            {line.replace('## ', '')}
+          <h3 key={lineIndex} className="font-bold text-sm mt-2.5 mb-1 text-cyan-200">
+            {formatInlineMarkdown(line.slice(3))}
+          </h3>
+        );
+      } else if (line.startsWith('# ')) {
+        elements.push(
+          <h3 key={lineIndex} className="font-bold text-sm mt-2.5 mb-1 text-white">
+            {formatInlineMarkdown(line.slice(2))}
           </h3>
         );
       } else if (line.trim() === '') {
@@ -363,11 +388,19 @@ Select an operational role above or ask anything about your reconnaissance workf
       } else {
         elements.push(
           <p key={lineIndex} className="text-slate-300 text-xs leading-relaxed my-0.5">
-            {formattedLine}
+            {formatInlineMarkdown(line)}
           </p>
         );
       }
     });
+
+    if (inCodeBlock && codeBlockContent.length > 0) {
+      elements.push(
+        <div key="codeblock-trailing" className="my-2 rounded-lg bg-slate-950 border border-slate-800 p-2.5 font-mono text-xs text-cyan-300 overflow-x-auto relative group">
+          <pre>{codeBlockContent.join('\n')}</pre>
+        </div>
+      );
+    }
 
     return elements;
   };
@@ -402,16 +435,20 @@ Select an operational role above or ask anything about your reconnaissance workf
 
   return (
     <div
-      className={`fixed z-50 transition-all duration-200 flex flex-col shadow-2xl border border-slate-700/80 bg-[#0F172A] ${
+      className={`transition-all duration-200 flex flex-col shadow-2xl border border-slate-700/80 bg-[#0F172A] ${
         isFloating
           ? isExpanded
-            ? 'bottom-4 right-4 w-[92vw] max-w-2xl h-[88vh] rounded-2xl'
-            : 'bottom-4 right-4 w-[94vw] sm:w-[460px] h-[620px] max-h-[90vh] rounded-2xl'
-          : 'w-full h-full rounded-none border-none'
+            ? 'fixed z-50 bottom-4 right-4 w-[92vw] max-w-2xl h-[88vh] rounded-2xl'
+            : 'fixed z-50 bottom-4 right-4 w-[94vw] sm:w-[460px] h-[620px] max-h-[90vh] rounded-2xl'
+          : 'relative w-full h-full rounded-none border-none'
       }`}
     >
       {/* Header */}
-      <div className="p-3.5 bg-slate-900/90 border-b border-slate-800 flex items-center justify-between shrink-0 rounded-t-2xl">
+      <div
+        className={`p-3.5 bg-slate-900/90 border-b border-slate-800 flex items-center justify-between shrink-0 ${
+          isFloating ? 'rounded-t-2xl' : ''
+        }`}
+      >
         <div className="flex items-center gap-2.5 min-w-0">
           <div className="w-8 h-8 rounded-lg bg-gradient-to-tr from-cyan-600 to-blue-600 flex items-center justify-center text-white shadow-md shadow-cyan-500/20 shrink-0">
             <Bot className="w-4 h-4" />
@@ -434,27 +471,29 @@ Select an operational role above or ask anything about your reconnaissance workf
         <div className="flex items-center gap-1">
           <button
             onClick={handleClearHistory}
-            className="p-1.5 rounded-lg text-slate-400 hover:text-slate-200 hover:bg-slate-800 transition-colors"
+            className="p-1.5 rounded-lg text-slate-400 hover:text-slate-200 hover:bg-slate-800 transition-colors cursor-pointer"
             title="Clear Chat History"
           >
             <Trash2 className="w-3.5 h-3.5" />
           </button>
           {isFloating && (
-            <button
-              onClick={() => setIsExpanded(!isExpanded)}
-              className="p-1.5 rounded-lg text-slate-400 hover:text-slate-200 hover:bg-slate-800 transition-colors"
-              title={isExpanded ? 'Restore Size' : 'Expand View'}
-            >
-              {isExpanded ? <Minimize2 className="w-3.5 h-3.5" /> : <Maximize2 className="w-3.5 h-3.5" />}
-            </button>
+            <>
+              <button
+                onClick={() => setIsExpanded(!isExpanded)}
+                className="p-1.5 rounded-lg text-slate-400 hover:text-slate-200 hover:bg-slate-800 transition-colors cursor-pointer"
+                title={isExpanded ? 'Restore Size' : 'Expand View'}
+              >
+                {isExpanded ? <Minimize2 className="w-3.5 h-3.5" /> : <Maximize2 className="w-3.5 h-3.5" />}
+              </button>
+              <button
+                onClick={handleClose}
+                className="p-1.5 rounded-lg text-slate-400 hover:text-rose-400 hover:bg-slate-800 transition-colors cursor-pointer"
+                title="Close Assistant"
+              >
+                <X className="w-4 h-4" />
+              </button>
+            </>
           )}
-          <button
-            onClick={handleClose}
-            className="p-1.5 rounded-lg text-slate-400 hover:text-rose-400 hover:bg-slate-800 transition-colors"
-            title="Close Assistant"
-          >
-            <X className="w-4 h-4" />
-          </button>
         </div>
       </div>
 
@@ -487,7 +526,7 @@ Select an operational role above or ask anything about your reconnaissance workf
           <div className="flex items-center gap-1.5 text-cyan-300 truncate">
             <Target className="w-3 h-3 text-cyan-400 shrink-0" />
             <span className="truncate">
-              Target: <strong className="font-mono text-white">{currentAssessment.scope.rootDomain}</strong>
+              Target: <strong className="font-mono text-white">{currentAssessment.scope?.rootDomain || 'N/A'}</strong>
             </span>
           </div>
           <button
@@ -599,7 +638,11 @@ Select an operational role above or ask anything about your reconnaissance workf
       </div>
 
       {/* Input Box */}
-      <div className="p-3 bg-slate-900/90 border-t border-slate-800 shrink-0 rounded-b-2xl">
+      <div
+        className={`p-3 bg-slate-900/90 border-t border-slate-800 shrink-0 ${
+          isFloating ? 'rounded-b-2xl' : ''
+        }`}
+      >
         <div className="flex items-end gap-2 bg-slate-950 border border-slate-700/80 rounded-xl p-1.5 focus-within:border-cyan-500/80 focus-within:ring-1 focus-within:ring-cyan-500/30 transition-all">
           <textarea
             ref={textareaRef}

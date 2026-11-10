@@ -1,7 +1,7 @@
 import React, { useState, useEffect } from 'react';
 import { AuditLog, Assessment } from '../types';
 import { firestoreService } from '../services/firestoreService';
-import { History, Shield, Lock, Search, Download } from 'lucide-react';
+import { History, Search, Download } from 'lucide-react';
 
 interface Props {
   assessments: Assessment[];
@@ -42,9 +42,21 @@ export const AuditLogs: React.FC<Props> = ({ assessments }) => {
     const a = document.createElement('a');
     a.href = url;
     a.download = `reconx-audit-trail-${Date.now()}.json`;
+    document.body.appendChild(a);
     a.click();
+    document.body.removeChild(a);
     URL.revokeObjectURL(url);
   };
+
+  const filteredLogs = logs.filter((l) => {
+    if (!search.trim()) return true;
+    const q = search.trim().toLowerCase();
+    return (
+      l.action.toLowerCase().includes(q) ||
+      l.actorEmail.toLowerCase().includes(q) ||
+      l.details.toLowerCase().includes(q)
+    );
+  });
 
   return (
     <div className="space-y-6 max-w-7xl mx-auto">
@@ -63,7 +75,8 @@ export const AuditLogs: React.FC<Props> = ({ assessments }) => {
 
         <button
           onClick={exportAuditJson}
-          className="flex items-center gap-1.5 px-3 py-2 bg-slate-800 hover:bg-slate-700 text-slate-200 rounded-xl text-xs font-medium border border-slate-700 shrink-0"
+          disabled={logs.length === 0}
+          className="flex items-center gap-1.5 px-3 py-2 bg-slate-800 hover:bg-slate-700 disabled:opacity-50 disabled:cursor-not-allowed text-slate-200 rounded-xl text-xs font-medium border border-slate-700 shrink-0 cursor-pointer"
         >
           <Download className="w-4 h-4 text-cyan-400" /> Export Audit Trail
         </button>
@@ -78,7 +91,7 @@ export const AuditLogs: React.FC<Props> = ({ assessments }) => {
               placeholder="Search audit action, operator email, or details..."
               value={search}
               onChange={(e) => setSearch(e.target.value)}
-              className="pl-9 pr-3 py-1.5 text-xs bg-slate-950 border border-slate-700 rounded-xl text-slate-200 placeholder-slate-500 focus:outline-none focus:border-blue-500 w-72"
+              className="pl-9 pr-3 py-1.5 text-xs bg-slate-950 border border-slate-700 rounded-xl text-slate-200 placeholder-slate-500 focus:outline-none focus:border-blue-500 w-full sm:w-72"
             />
           </div>
         </div>
@@ -90,6 +103,18 @@ export const AuditLogs: React.FC<Props> = ({ assessments }) => {
         ) : logs.length === 0 ? (
           <div className="p-12 text-center text-slate-400 font-mono text-xs">
             No audit records created yet.
+          </div>
+        ) : filteredLogs.length === 0 ? (
+          <div className="p-12 text-center space-y-2">
+            <div className="text-slate-400 font-mono text-xs">
+              No audit records match query &quot;{search}&quot;.
+            </div>
+            <button
+              onClick={() => setSearch('')}
+              className="text-xs text-cyan-400 hover:underline font-mono cursor-pointer"
+            >
+              Reset Search
+            </button>
           </div>
         ) : (
           <div className="overflow-x-auto">
@@ -104,19 +129,7 @@ export const AuditLogs: React.FC<Props> = ({ assessments }) => {
                 </tr>
               </thead>
               <tbody className="divide-y divide-slate-800/60 text-slate-300">
-                {logs
-                  .filter((l) => {
-                    if (
-                      search &&
-                      !l.action.toLowerCase().includes(search.toLowerCase()) &&
-                      !l.actorEmail.toLowerCase().includes(search.toLowerCase()) &&
-                      !l.details.toLowerCase().includes(search.toLowerCase())
-                    ) {
-                      return false;
-                    }
-                    return true;
-                  })
-                  .map((l) => (
+                {filteredLogs.map((l) => (
                     <tr key={l.id} className="hover:bg-slate-800/30">
                       <td className="px-4 py-3 text-slate-400 text-[11px]">
                         {new Date(l.timestamp).toLocaleString()}

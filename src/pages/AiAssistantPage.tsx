@@ -1,7 +1,7 @@
 import React from 'react';
 import { GeminiChatbot } from '../components/chat/GeminiChatbot';
 import { Assessment } from '../types';
-import { Bot, Sparkles, Shield, Cpu, Zap, Brain } from 'lucide-react';
+import { Bot } from 'lucide-react';
 
 interface AiAssistantPageProps {
   currentAssessment: Assessment | null;
@@ -48,7 +48,7 @@ export const AiAssistantPage: React.FC<AiAssistantPageProps> = ({
             >
               {assessments.map((a) => (
                 <option key={a.id} value={a.id}>
-                  {a.scope.rootDomain} ({a.name})
+                  {a.scope?.rootDomain || 'N/A'} ({a.name})
                 </option>
               ))}
             </select>

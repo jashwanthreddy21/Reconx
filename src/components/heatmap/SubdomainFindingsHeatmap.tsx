@@ -9,16 +9,19 @@ import {
   Shield,
   Layers,
   ArrowUpDown,
-  Filter,
   CheckCircle2,
   ExternalLink,
-  ChevronRight,
-  Info,
-  Maximize2,
-  RefreshCw,
-  Sparkles,
   X
 } from 'lucide-react';
+
+function escapeHtml(value: string): string {
+  return String(value)
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;')
+    .replace(/'/g, '&#39;');
+}
 
 interface SubdomainFindingsHeatmapProps {
   assessment: Assessment;
@@ -104,9 +107,26 @@ export const SubdomainFindingsHeatmap: React.FC<SubdomainFindingsHeatmapProps> =
   const [selectedSeverityFilter, setSelectedSeverityFilter] = useState<'all' | FindingSeverity>('all');
   const [selectedCell, setSelectedCell] = useState<HeatmapCell | null>(null);
   const [viewMode, setViewMode] = useState<'severity' | 'category'>('severity');
+  const [containerWidth, setContainerWidth] = useState<number>(800);
+
+  // Track responsive container width with ResizeObserver
+  useEffect(() => {
+    const el = containerRef.current;
+    if (!el) return;
+    const updateWidth = () => {
+      if (el.clientWidth > 0) {
+        setContainerWidth(el.clientWidth);
+      }
+    };
+    updateWidth();
+    if (typeof ResizeObserver === 'undefined') return;
+    const observer = new ResizeObserver(updateWidth);
+    observer.observe(el);
+    return () => observer.disconnect();
+  }, []);
 
   // Extract all relevant subdomains
-  const rootDomain = assessment.scope.rootDomain || 'target.domain';
+  const rootDomain = (assessment.scope.rootDomain || 'target.domain').trim().toLowerCase();
 
   const allSubdomains = useMemo(() => {
     const set = new Set<string>();
@@ -141,6 +161,8 @@ export const SubdomainFindingsHeatmap: React.FC<SubdomainFindingsHeatmapProps> =
     const map = new Map<string, Finding[]>();
     allSubdomains.forEach((s) => map.set(s, []));
 
+    const sortedSubdomains = [...allSubdomains].sort((a, b) => b.length - a.length);
+
     findings.forEach((f) => {
       let ref = (f.assetRef || '').trim().toLowerCase();
       ref = ref.replace(/^https?:\/\//i, '');
@@ -151,8 +173,8 @@ export const SubdomainFindingsHeatmap: React.FC<SubdomainFindingsHeatmapProps> =
       if (map.has(ref)) {
         targetSubdomain = ref;
       } else {
-        // Try fuzzy subdomain matching
-        const matched = allSubdomains.find(
+        // Prefer longest matching subdomain before falling back to rootDomain
+        const matched = sortedSubdomains.find(
           (s) => s === ref || ref.endsWith('.' + s) || s.endsWith('.' + ref)
         );
         if (matched) {
@@ -310,18 +332,28 @@ export const SubdomainFindingsHeatmap: React.FC<SubdomainFindingsHeatmapProps> =
   useEffect(() => {
     if (!svgRef.current || !containerRef.current) return;
 
-    const containerWidth = containerRef.current.clientWidth || 800;
+    const effectiveWidth = Math.max(containerWidth, 640);
     const margin = {
       top: 45,
       right: 70,
       bottom: 25,
-      left: Math.min(Math.max(160, containerWidth * 0.28), 240),
+      left: Math.min(Math.max(160, effectiveWidth * 0.28), 240),
     };
 
     const rowHeight = 44;
     const subdomainsList = filteredSubdomains.map((s) => s.subdomain);
     const height = Math.max(subdomainsList.length * rowHeight + margin.top + margin.bottom, 220);
-    const width = containerWidth;
+    const width = effectiveWidth;
+
+    const positionTooltip = (event: MouseEvent) => {
+      if (!tooltipRef.current) return;
+      const maxX = Math.max(8, (window.innerWidth || 1024) - 340);
+      const maxY = Math.max(8, (window.innerHeight || 768) - 180);
+      const left = Math.min(event.clientX + 12, maxX);
+      const top = Math.max(8, Math.min(event.clientY - 24, maxY));
+      tooltipRef.current.style.left = `${left}px`;
+      tooltipRef.current.style.top = `${top}px`;
+    };
 
     const svg = d3.select(svgRef.current);
     svg.selectAll('*').remove();
@@ -330,7 +362,7 @@ export const SubdomainFindingsHeatmap: React.FC<SubdomainFindingsHeatmapProps> =
       .attr('width', width)
       .attr('height', height)
       .attr('viewBox', `0 0 ${width} ${height}`)
-      .attr('style', 'max-width: 100%; height: auto;');
+      .attr('style', 'min-width: 640px; height: auto;');
 
     const g = svg.append('g').attr('transform', `translate(${margin.left},${margin.top})`);
     const innerWidth = width - margin.left - margin.right;
@@ -427,7 +459,7 @@ export const SubdomainFindingsHeatmap: React.FC<SubdomainFindingsHeatmapProps> =
         .attr('class', 'row-label cursor-pointer')
         .attr('transform', (d) => `translate(-12, ${(yScale(d) || 0) + yScale.bandwidth() / 2})`)
         .on('click', (_, subdomain) => {
-          setSearchQuery(subdomain === searchQuery ? '' : subdomain);
+          setSearchQuery((prev) => (prev === subdomain ? '' : subdomain));
         })
         .each(function (subdomain) {
           const rowG = d3.select(this);
@@ -491,15 +523,16 @@ export const SubdomainFindingsHeatmap: React.FC<SubdomainFindingsHeatmapProps> =
             .attr('stroke-width', 2)
             .style('filter', d.count > 0 ? `drop-shadow(0 0 8px ${SEVERITY_COLORS[d.severity].glow})` : 'none');
 
-          // Tooltip handling
+          // Tooltip handling (escaped HTML + viewport-relative fixed positioning)
           if (tooltipRef.current) {
             const meta = SEVERITY_COLORS[d.severity];
+            const safeSubdomain = escapeHtml(d.subdomain);
             tooltipRef.current.innerHTML = `
               <div class="p-3 max-w-xs text-xs space-y-1.5 font-sans">
-                <div class="flex items-center justify-between border-b border-slate-700/80 pb-1.5">
-                  <span class="font-mono font-semibold text-white truncate">${d.subdomain}</span>
-                  <span class="px-2 py-0.5 rounded text-[10px] font-mono font-bold uppercase" style="background:${meta.glow}; color:${meta.base}; border:1px solid ${meta.border}">
-                    ${meta.label}
+                <div class="flex items-center justify-between border-b border-slate-700/80 pb-1.5 gap-2">
+                  <span class="font-mono font-semibold text-white truncate">${safeSubdomain}</span>
+                  <span class="px-2 py-0.5 rounded text-[10px] font-mono font-bold uppercase shrink-0" style="background:${meta.glow}; color:${meta.base}; border:1px solid ${meta.border}">
+                    ${escapeHtml(meta.label)}
                   </span>
                 </div>
                 <div class="flex items-center justify-between text-slate-300">
@@ -514,8 +547,8 @@ export const SubdomainFindingsHeatmap: React.FC<SubdomainFindingsHeatmapProps> =
                           .map(
                             (f) =>
                               `<div class="text-[11px] text-slate-300 truncate flex items-center gap-1.5">
-                                <span class="w-1.5 h-1.5 rounded-full" style="background:${meta.base}"></span>
-                                <span>${f.title}</span>
+                                <span class="w-1.5 h-1.5 rounded-full shrink-0" style="background:${meta.base}"></span>
+                                <span class="truncate">${escapeHtml(f.title)}</span>
                               </div>`
                           )
                           .join('')}
@@ -535,15 +568,11 @@ export const SubdomainFindingsHeatmap: React.FC<SubdomainFindingsHeatmapProps> =
               </div>
             `;
             tooltipRef.current.style.opacity = '1';
-            tooltipRef.current.style.left = `${event.pageX + 12}px`;
-            tooltipRef.current.style.top = `${event.pageY - 28}px`;
+            positionTooltip(event as MouseEvent);
           }
         })
         .on('mousemove', function (event) {
-          if (tooltipRef.current) {
-            tooltipRef.current.style.left = `${event.pageX + 12}px`;
-            tooltipRef.current.style.top = `${event.pageY - 28}px`;
-          }
+          positionTooltip(event as MouseEvent);
         })
         .on('mouseout', function (_, d) {
           d3.select(this)
@@ -673,12 +702,17 @@ export const SubdomainFindingsHeatmap: React.FC<SubdomainFindingsHeatmapProps> =
         .data(subdomainsList)
         .enter()
         .append('text')
+        .attr('class', 'row-label cursor-pointer')
         .attr('x', -12)
         .attr('y', (d) => (yScale(d) || 0) + yScale.bandwidth() / 2 + 4)
         .attr('text-anchor', 'end')
-        .attr('fill', '#cbd5e1')
+        .attr('fill', (d) => (d === rootDomain ? '#38bdf8' : '#cbd5e1'))
         .attr('font-size', '11px')
         .attr('font-family', 'ui-monospace, monospace')
+        .attr('font-weight', (d) => (d === rootDomain ? '700' : '500'))
+        .on('click', (_, subdomain) => {
+          setSearchQuery((prev) => (prev === subdomain ? '' : subdomain));
+        })
         .text((d) => (d.length > 28 ? d.slice(0, 26) + '…' : d));
 
       // Category Cells
@@ -708,15 +742,17 @@ export const SubdomainFindingsHeatmap: React.FC<SubdomainFindingsHeatmapProps> =
           if (tooltipRef.current) {
             tooltipRef.current.innerHTML = `
               <div class="p-3 text-xs space-y-1">
-                <div class="font-mono text-white font-semibold">${d.subdomain}</div>
-                <div class="text-cyan-400 font-semibold">${d.category}</div>
+                <div class="font-mono text-white font-semibold">${escapeHtml(d.subdomain)}</div>
+                <div class="text-cyan-400 font-semibold">${escapeHtml(d.category)}</div>
                 <div class="text-slate-300">${d.count} finding${d.count === 1 ? '' : 's'}</div>
               </div>
             `;
             tooltipRef.current.style.opacity = '1';
-            tooltipRef.current.style.left = `${event.pageX + 12}px`;
-            tooltipRef.current.style.top = `${event.pageY - 24}px`;
+            positionTooltip(event as MouseEvent);
           }
+        })
+        .on('mousemove', function (event) {
+          positionTooltip(event as MouseEvent);
         })
         .on('mouseout', function (_, d) {
           d3.select(this)
@@ -748,6 +784,11 @@ export const SubdomainFindingsHeatmap: React.FC<SubdomainFindingsHeatmapProps> =
           .text(d.count > 0 ? d.count : '—');
       });
     }
+    return () => {
+      if (tooltipRef.current) {
+        tooltipRef.current.style.opacity = '0';
+      }
+    };
   }, [
     filteredSubdomains,
     matrixData,
@@ -756,6 +797,7 @@ export const SubdomainFindingsHeatmap: React.FC<SubdomainFindingsHeatmapProps> =
     rootDomain,
     viewMode,
     allCategories,
+    containerWidth,
   ]);
 
   // Export SVG to download
@@ -767,7 +809,9 @@ export const SubdomainFindingsHeatmap: React.FC<SubdomainFindingsHeatmapProps> =
     const a = document.createElement('a');
     a.href = url;
     a.download = `reconx-subdomain-heatmap-${assessment.scope.rootDomain}.svg`;
+    document.body.appendChild(a);
     a.click();
+    document.body.removeChild(a);
     URL.revokeObjectURL(url);
   };
 
@@ -989,7 +1033,7 @@ export const SubdomainFindingsHeatmap: React.FC<SubdomainFindingsHeatmapProps> =
 
       {/* Selected Cell Detail Drawer / Inspection Modal */}
       {selectedCell && (
-        <div className="bg-[#111827] border border-slate-700/80 rounded-2xl p-5 shadow-2xl space-y-4 animate-in fade-in slide-in-from-top-2 duration-200">
+        <div className="bg-[#111827] border border-slate-700/80 rounded-2xl p-5 shadow-2xl space-y-4 animate-fadeIn">
           <div className="flex items-start justify-between gap-4 border-b border-slate-800 pb-3">
             <div>
               <div className="flex items-center gap-2 mb-1">

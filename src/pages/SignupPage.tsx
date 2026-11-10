@@ -1,4 +1,4 @@
-import React, { useState, useMemo } from 'react';
+import React, { useState, useMemo, useEffect } from 'react';
 import { useAuth } from '../context/AuthContext';
 import { UserRole } from '../types';
 import {
@@ -37,6 +37,12 @@ export const SignupPage: React.FC<SignupPageProps> = ({
   const [acceptedTerms, setAcceptedTerms] = useState(false);
   const [submitting, setSubmitting] = useState(false);
   const [localError, setLocalError] = useState<string | null>(null);
+
+  useEffect(() => {
+    clearAuthError();
+    // Clear stale auth error when switching to Signup view
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
 
   // Dynamic Password Strength Evaluation
   const passwordCriteria = useMemo(() => {
@@ -353,6 +359,9 @@ export const SignupPage: React.FC<SignupPageProps> = ({
                       <div className={`flex items-center gap-1 ${passwordCriteria.hasUpper ? 'text-emerald-400' : ''}`}>
                         <span>•</span> Uppercase letter
                       </div>
+                      <div className={`flex items-center gap-1 ${passwordCriteria.hasLower ? 'text-emerald-400' : ''}`}>
+                        <span>•</span> Lowercase letter
+                      </div>
                       <div className={`flex items-center gap-1 ${passwordCriteria.hasSpecial ? 'text-emerald-400' : ''}`}>
                         <span>•</span> Special symbol
                       </div>
@@ -454,7 +463,7 @@ export const SignupPage: React.FC<SignupPageProps> = ({
                 type="button"
                 onClick={handleGoogleSignUp}
                 disabled={submitting}
-                className="w-full py-2.5 px-4 bg-slate-800/80 hover:bg-slate-750 border border-slate-700 text-slate-200 rounded-xl text-xs sm:text-sm font-semibold transition-all cursor-pointer flex items-center justify-center gap-2.5 shadow-sm hover:border-slate-600 disabled:opacity-50"
+                className="w-full py-2.5 px-4 bg-slate-800/80 hover:bg-slate-700/80 border border-slate-700 text-slate-200 rounded-xl text-xs sm:text-sm font-semibold transition-all cursor-pointer flex items-center justify-center gap-2.5 shadow-sm hover:border-slate-600 disabled:opacity-50"
               >
                 <svg className="w-4 h-4" viewBox="0 0 24 24">
                   <path

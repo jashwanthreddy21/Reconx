@@ -13,7 +13,6 @@ import {
   CheckCircle2,
   XCircle,
   ArrowRight,
-  ExternalLink,
   Beaker,
   Activity,
   FileDown,
@@ -27,7 +26,6 @@ import {
   Trash2,
   Filter,
   CheckSquare,
-  Square,
   AlertOctagon,
 } from 'lucide-react';
 import { generateAssessmentSummaryPdf } from '../services/pdfReportGenerator';
@@ -63,29 +61,52 @@ export const Dashboard: React.FC<Props> = ({
 }) => {
   const [showExportMenu, setShowExportMenu] = useState(false);
   const [isExporting, setIsExporting] = useState(false);
-  const [activeRowMenuId, setActiveRowMenuId] = useState<string | null>(null);
+  const [activeRowMenu, setActiveRowMenu] = useState<{
+    assessment: Assessment;
+    left: number;
+    top?: number;
+    bottom?: number;
+  } | null>(null);
   const exportMenuRef = useRef<HTMLDivElement>(null);
 
-  // Status Filter State: 'all' | 'queued' | 'running' | 'completed' | 'failed'
+  // Status Filter State: 'all' | 'queued' | 'running' | 'completed' | 'failed' | 'cancelled'
   const [statusFilter, setStatusFilter] = useState<string>('all');
 
   // Multi-select Checkbox State
   const [selectedIds, setSelectedIds] = useState<Set<string>>(new Set());
   const [showDeleteModal, setShowDeleteModal] = useState(false);
   const [isDeleting, setIsDeleting] = useState(false);
+  const [deleteError, setDeleteError] = useState<string | null>(null);
+  const [exportingPdfId, setExportingPdfId] = useState<string | null>(null);
 
-  // Close dropdown on outside click
+  // Close dropdowns on outside click, scroll, or viewport resize
   useEffect(() => {
     const handleOutsideClick = (e: MouseEvent) => {
-      if (exportMenuRef.current && !exportMenuRef.current.contains(e.target as Node)) {
+      const target = e.target;
+      const targetElement =
+        target instanceof Element
+          ? target
+          : target instanceof Node
+          ? target.parentElement
+          : null;
+      if (exportMenuRef.current && (!target || !(target instanceof Node) || !exportMenuRef.current.contains(target))) {
         setShowExportMenu(false);
       }
-      if (!(e.target as HTMLElement).closest('.row-export-menu-container')) {
-        setActiveRowMenuId(null);
+      if (!targetElement?.closest('.row-export-menu-container') && !targetElement?.closest('.row-export-dropdown')) {
+        setActiveRowMenu(null);
       }
     };
+    const handleViewportChange = () => {
+      setActiveRowMenu(null);
+    };
     document.addEventListener('mousedown', handleOutsideClick);
-    return () => document.removeEventListener('mousedown', handleOutsideClick);
+    window.addEventListener('resize', handleViewportChange);
+    window.addEventListener('scroll', handleViewportChange, true);
+    return () => {
+      document.removeEventListener('mousedown', handleOutsideClick);
+      window.removeEventListener('resize', handleViewportChange);
+      window.removeEventListener('scroll', handleViewportChange, true);
+    };
   }, []);
 
   // Clear selections that no longer exist when assessments change
@@ -105,9 +126,10 @@ export const Dashboard: React.FC<Props> = ({
     return {
       all: assessments.length,
       queued: assessments.filter((a) => a.status === 'queued').length,
-      running: assessments.filter((a) => a.status === 'running').length,
+      running: assessments.filter((a) => a.status === 'running' || a.status === 'validating').length,
       completed: assessments.filter((a) => a.status === 'completed').length,
       failed: assessments.filter((a) => a.status === 'failed').length,
+      cancelled: assessments.filter((a) => a.status === 'cancelled').length,
     };
   }, [assessments]);
 
@@ -116,7 +138,11 @@ export const Dashboard: React.FC<Props> = ({
     return assessments.filter((a) => {
       // 1. Status Filter
       if (statusFilter !== 'all') {
-        if (a.status !== statusFilter) return false;
+        if (statusFilter === 'running') {
+          if (a.status !== 'running' && a.status !== 'validating') return false;
+        } else if (a.status !== statusFilter) {
+          return false;
+        }
       }
       // 2. Search Query Filter
       if (!searchQuery?.trim()) return true;
@@ -178,6 +204,7 @@ export const Dashboard: React.FC<Props> = ({
     const idsToDelete = Array.from(selectedIds);
     if (idsToDelete.length === 0) return;
     setIsDeleting(true);
+    setDeleteError(null);
     try {
       if (onDeleteAssessments) {
         await onDeleteAssessments(idsToDelete);
@@ -186,10 +213,33 @@ export const Dashboard: React.FC<Props> = ({
       }
       setSelectedIds(new Set());
       setShowDeleteModal(false);
-    } catch (err) {
+    } catch (err: any) {
       console.error('Failed to delete assessments:', err);
+      setDeleteError(err?.message || 'Failed to delete selected assessments.');
     } finally {
       setIsDeleting(false);
+    }
+  };
+
+  const handleGeneratePdf = async (assessment: Assessment) => {
+    if (exportingPdfId) return;
+    setExportingPdfId(assessment.id);
+    try {
+      const findings = await firestoreService.getFindings(assessment.id);
+      generateAssessmentSummaryPdf({
+        assessment,
+        findings: findings || [],
+        totalFindingsCount: assessment.stats?.findingsCount,
+      });
+    } catch (err) {
+      console.warn(`Could not fetch findings before PDF export for ${assessment.id}:`, err);
+      generateAssessmentSummaryPdf({
+        assessment,
+        findings: [],
+        totalFindingsCount: assessment.stats?.findingsCount,
+      });
+    } finally {
+      setExportingPdfId(null);
     }
   };
 
@@ -449,7 +499,7 @@ export const Dashboard: React.FC<Props> = ({
 
   // Row-Level Export Handlers
   const handleExportSingleCsv = async (assessment: Assessment) => {
-    setActiveRowMenuId(null);
+    setActiveRowMenu(null);
     setIsExporting(true);
     try {
       const findings = await firestoreService.getFindings(assessment.id);
@@ -463,7 +513,7 @@ export const Dashboard: React.FC<Props> = ({
   };
 
   const handleExportSingleJson = async (assessment: Assessment) => {
-    setActiveRowMenuId(null);
+    setActiveRowMenu(null);
     setIsExporting(true);
     try {
       const findings = await firestoreService.getFindings(assessment.id);
@@ -657,11 +707,14 @@ export const Dashboard: React.FC<Props> = ({
             </div>
 
             {[
-              { key: 'all', label: 'All', count: statusCounts.all, dot: null },
-              { key: 'completed', label: 'Completed', count: statusCounts.completed, dot: 'bg-emerald-400 shadow-[0_0_6px_rgba(52,211,153,0.9)]' },
-              { key: 'running', label: 'Running', count: statusCounts.running, dot: 'bg-cyan-400 animate-ping' },
-              { key: 'queued', label: 'Queued', count: statusCounts.queued, dot: 'bg-amber-400 shadow-[0_0_6px_rgba(251,191,36,0.9)]' },
-              { key: 'failed', label: 'Failed', count: statusCounts.failed, dot: 'bg-rose-500 shadow-[0_0_6px_rgba(244,63,94,0.9)]' },
+              { key: 'all', label: 'All', count: statusCounts.all, dot: null as string | null, ping: false },
+              { key: 'completed', label: 'Completed', count: statusCounts.completed, dot: 'bg-emerald-400 shadow-[0_0_6px_rgba(52,211,153,0.9)]', ping: false },
+              { key: 'running', label: 'Running', count: statusCounts.running, dot: 'bg-cyan-400', ping: true },
+              { key: 'queued', label: 'Queued', count: statusCounts.queued, dot: 'bg-amber-400 shadow-[0_0_6px_rgba(251,191,36,0.9)]', ping: false },
+              { key: 'failed', label: 'Failed', count: statusCounts.failed, dot: 'bg-rose-500 shadow-[0_0_6px_rgba(244,63,94,0.9)]', ping: false },
+              ...(statusCounts.cancelled > 0
+                ? [{ key: 'cancelled', label: 'Cancelled', count: statusCounts.cancelled, dot: 'bg-slate-400', ping: false }]
+                : []),
             ].map((chip) => {
               const active = statusFilter === chip.key;
               return (
@@ -674,7 +727,16 @@ export const Dashboard: React.FC<Props> = ({
                       : 'bg-slate-800/60 text-slate-400 hover:text-slate-200 hover:bg-slate-800 border border-slate-700/60'
                   }`}
                 >
-                  {chip.dot && <span className={`w-1.5 h-1.5 rounded-full ${chip.dot}`} />}
+                  {chip.dot && (
+                    chip.ping ? (
+                      <span className="relative flex h-1.5 w-1.5 shrink-0">
+                        <span className="animate-ping absolute inline-flex h-full w-full rounded-full bg-cyan-400 opacity-75" />
+                        <span className="relative inline-flex rounded-full h-1.5 w-1.5 bg-cyan-400" />
+                      </span>
+                    ) : (
+                      <span className={`w-1.5 h-1.5 rounded-full ${chip.dot}`} />
+                    )
+                  )}
                   <span>{chip.label}</span>
                   <span
                     className={`text-[10px] font-mono px-1 rounded ${
@@ -735,7 +797,10 @@ export const Dashboard: React.FC<Props> = ({
               </button>
 
               <button
-                onClick={() => setShowDeleteModal(true)}
+                onClick={() => {
+                  setDeleteError(null);
+                  setShowDeleteModal(true);
+                }}
                 className="inline-flex items-center gap-1.5 px-3 py-1 rounded-lg bg-rose-600 hover:bg-rose-500 text-white text-xs font-semibold shadow-md shadow-rose-600/30 transition-all cursor-pointer"
               >
                 <Trash2 className="w-3.5 h-3.5" />
@@ -872,15 +937,12 @@ export const Dashboard: React.FC<Props> = ({
                       {/* Row Checkbox */}
                       <td
                         className="px-3 py-3.5 text-center"
-                        onClick={(e) => {
-                          e.stopPropagation();
-                          toggleSelectOne(a.id);
-                        }}
+                        onClick={(e) => e.stopPropagation()}
                       >
                         <input
                           type="checkbox"
                           checked={isSelected}
-                          onChange={() => {}}
+                          onChange={() => toggleSelectOne(a.id)}
                           className="w-4 h-4 rounded bg-slate-900 border-slate-700 text-blue-600 focus:ring-0 focus:ring-offset-0 cursor-pointer accent-blue-600"
                           aria-label={`Select assessment ${a.name}`}
                         />
@@ -933,12 +995,18 @@ export const Dashboard: React.FC<Props> = ({
                         <button
                           onClick={(e) => {
                             e.stopPropagation();
-                            generateAssessmentSummaryPdf({ assessment: a });
+                            handleGeneratePdf(a);
                           }}
-                          className="inline-flex items-center gap-1 px-2 py-1 rounded bg-slate-800 hover:bg-slate-700 text-cyan-400 hover:text-cyan-300 transition-all text-xs font-medium border border-slate-700 cursor-pointer"
+                          disabled={exportingPdfId !== null}
+                          className="inline-flex items-center gap-1 px-2 py-1 rounded bg-slate-800 hover:bg-slate-700 disabled:opacity-50 text-cyan-400 hover:text-cyan-300 transition-all text-xs font-medium border border-slate-700 cursor-pointer"
                           title="Generate & Download Summary PDF Report"
                         >
-                          <FileDown className="w-3.5 h-3.5" /> PDF
+                          {exportingPdfId === a.id ? (
+                            <Loader2 className="w-3.5 h-3.5 animate-spin" />
+                          ) : (
+                            <FileDown className="w-3.5 h-3.5" />
+                          )}
+                          PDF
                         </button>
 
                         {/* CSV/JSON Download Dropdown for this Assessment */}
@@ -946,7 +1014,24 @@ export const Dashboard: React.FC<Props> = ({
                           <button
                             onClick={(e) => {
                               e.stopPropagation();
-                              setActiveRowMenuId(activeRowMenuId === a.id ? null : a.id);
+                              if (activeRowMenu?.assessment.id === a.id) {
+                                setActiveRowMenu(null);
+                                return;
+                              }
+                              const rect = e.currentTarget.getBoundingClientRect();
+                              const menuWidth = 176;
+                              const menuHeight = 96;
+                              const openUpward = window.innerHeight - rect.bottom < menuHeight;
+                              const left = Math.max(
+                                8,
+                                Math.min(rect.right - menuWidth, window.innerWidth - menuWidth - 8)
+                              );
+                              setActiveRowMenu({
+                                assessment: a,
+                                left,
+                                top: openUpward ? undefined : rect.bottom + 4,
+                                bottom: openUpward ? window.innerHeight - rect.top + 4 : undefined,
+                              });
                             }}
                             className="inline-flex items-center gap-0.5 px-2 py-1 rounded bg-slate-800 hover:bg-slate-700 text-emerald-400 hover:text-emerald-300 transition-all text-xs font-medium border border-slate-700 cursor-pointer"
                             title="Export metadata and findings as CSV or JSON"
@@ -954,31 +1039,6 @@ export const Dashboard: React.FC<Props> = ({
                             <Download className="w-3.5 h-3.5" />
                             <ChevronDown className="w-3 h-3 text-slate-400" />
                           </button>
-
-                          {activeRowMenuId === a.id && (
-                            <div className="absolute right-0 mt-1 w-44 bg-slate-900 border border-slate-700 rounded-lg shadow-xl py-1 z-50 text-left text-xs">
-                              <button
-                                onClick={(e) => {
-                                  e.stopPropagation();
-                                  handleExportSingleCsv(a);
-                                }}
-                                className="w-full text-left px-3 py-1.5 text-slate-200 hover:bg-slate-800 flex items-center gap-2"
-                              >
-                                <FileSpreadsheet className="w-3.5 h-3.5 text-emerald-400" />
-                                <span>Export CSV</span>
-                              </button>
-                              <button
-                                onClick={(e) => {
-                                  e.stopPropagation();
-                                  handleExportSingleJson(a);
-                                }}
-                                className="w-full text-left px-3 py-1.5 text-slate-200 hover:bg-slate-800 flex items-center gap-2"
-                              >
-                                <Code className="w-3.5 h-3.5 text-cyan-400" />
-                                <span>Export JSON</span>
-                              </button>
-                            </div>
-                          )}
                         </div>
 
                         {/* Inspect Button */}
@@ -1011,6 +1071,39 @@ export const Dashboard: React.FC<Props> = ({
         </div>
       </div>
 
+      {/* Fixed Row Export Dropdown Portal (prevents clipping by overflow-x-auto table container) */}
+      {activeRowMenu && (
+        <div
+          className="fixed z-50 w-44 bg-slate-900 border border-slate-700 rounded-lg shadow-xl py-1 text-left text-xs row-export-dropdown"
+          style={{
+            left: `${activeRowMenu.left}px`,
+            top: activeRowMenu.top !== undefined ? `${activeRowMenu.top}px` : undefined,
+            bottom: activeRowMenu.bottom !== undefined ? `${activeRowMenu.bottom}px` : undefined,
+          }}
+        >
+          <button
+            onClick={(e) => {
+              e.stopPropagation();
+              handleExportSingleCsv(activeRowMenu.assessment);
+            }}
+            className="w-full text-left px-3 py-1.5 text-slate-200 hover:bg-slate-800 flex items-center gap-2 cursor-pointer"
+          >
+            <FileSpreadsheet className="w-3.5 h-3.5 text-emerald-400" />
+            <span>Export CSV</span>
+          </button>
+          <button
+            onClick={(e) => {
+              e.stopPropagation();
+              handleExportSingleJson(activeRowMenu.assessment);
+            }}
+            className="w-full text-left px-3 py-1.5 text-slate-200 hover:bg-slate-800 flex items-center gap-2 cursor-pointer"
+          >
+            <Code className="w-3.5 h-3.5 text-cyan-400" />
+            <span>Export JSON</span>
+          </button>
+        </div>
+      )}
+
       {/* Delete Confirmation Modal */}
       {showDeleteModal && (
         <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/70 backdrop-blur-sm">
@@ -1032,21 +1125,30 @@ export const Dashboard: React.FC<Props> = ({
               {assessments
                 .filter((a) => selectedIds.has(a.id))
                 .map((a) => (
-                  <div key={a.id} className="flex items-center justify-between text-slate-300">
-                    <div className="flex items-center gap-2 truncate max-w-[240px]">
+                  <div key={a.id} className="flex items-center justify-between gap-2 text-slate-300">
+                    <div className="flex items-center gap-2 truncate max-w-[220px]">
                       {renderStatusDot(a.status, false)}
                       <span className="truncate text-white">{a.name}</span>
                     </div>
-                    <span className="text-slate-500 text-[11px]">{a.scope?.rootDomain}</span>
+                    <span className="text-slate-500 text-[11px] truncate max-w-[150px]">{a.scope?.rootDomain}</span>
                   </div>
                 ))}
             </div>
 
+            {deleteError && (
+              <div className="p-2.5 rounded-lg bg-rose-500/10 border border-rose-500/30 text-rose-300 text-xs">
+                {deleteError}
+              </div>
+            )}
+
             <div className="flex items-center justify-end gap-3 pt-2">
               <button
                 disabled={isDeleting}
-                onClick={() => setShowDeleteModal(false)}
-                className="px-4 py-2 rounded-xl bg-slate-800 hover:bg-slate-700 text-slate-300 text-xs font-medium border border-slate-700 transition-colors cursor-pointer"
+                onClick={() => {
+                  setDeleteError(null);
+                  setShowDeleteModal(false);
+                }}
+                className="px-4 py-2 rounded-xl bg-slate-800 hover:bg-slate-700 disabled:opacity-50 text-slate-300 text-xs font-medium border border-slate-700 transition-colors cursor-pointer"
               >
                 Cancel
               </button>

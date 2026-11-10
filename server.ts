@@ -13,25 +13,34 @@ const __dirname = path.dirname(__filename);
 
 const app = express();
 
+const parsePortValue = (raw?: string): number | null => {
+  if (!raw) return null;
+  const parsed = Number.parseInt(raw.trim(), 10);
+  if (!Number.isFinite(parsed) || parsed <= 0 || parsed > 65535) {
+    return null;
+  }
+  return parsed;
+};
+
 const getPort = () => {
   // 1. Explicit CLI argument --port
   const portArgIndex = process.argv.indexOf('--port');
   if (portArgIndex !== -1 && process.argv[portArgIndex + 1]) {
-    return parseInt(process.argv[portArgIndex + 1], 10);
+    const cliPort = parsePortValue(process.argv[portArgIndex + 1]);
+    if (cliPort !== null) return cliPort;
   }
   // 2. Custom APP_PORT env var
-  if (process.env.APP_PORT) {
-    return parseInt(process.env.APP_PORT, 10);
-  }
+  const appPort = parsePortValue(process.env.APP_PORT);
+  if (appPort !== null) return appPort;
   // 3. AI Studio development environment has DEFAULT_APP_PORT=3000 while NGINX runs on 8080.
   // In dev, the app MUST bind to DEFAULT_APP_PORT (3000) so NGINX can proxy to it.
-  if (process.env.NODE_ENV !== 'production' && process.env.DEFAULT_APP_PORT) {
-    return parseInt(process.env.DEFAULT_APP_PORT, 10);
+  if (process.env.NODE_ENV !== 'production') {
+    const defaultAppPort = parsePortValue(process.env.DEFAULT_APP_PORT);
+    if (defaultAppPort !== null) return defaultAppPort;
   }
   // 4. Cloud Run production sets PORT (e.g. 8080). When published, the container must bind to PORT.
-  if (process.env.PORT) {
-    return parseInt(process.env.PORT, 10);
-  }
+  const envPort = parsePortValue(process.env.PORT);
+  if (envPort !== null) return envPort;
   // 5. Default fallback to port 3000
   return 3000;
 };
@@ -39,9 +48,17 @@ const PORT = getPort();
 
 app.use(express.json({ limit: '10mb' }));
 
+const getConfiguredApiKey = (): string | null => {
+  const apiKey = process.env.GEMINI_API_KEY?.trim();
+  if (!apiKey || apiKey === 'MY_GEMINI_API_KEY') {
+    return null;
+  }
+  return apiKey;
+};
+
 // Initialize GoogleGenAI client
 const getAiClient = () => {
-  const apiKey = process.env.GEMINI_API_KEY;
+  const apiKey = getConfiguredApiKey();
   if (!apiKey) {
     return null;
   }
@@ -54,6 +71,12 @@ const getAiClient = () => {
     },
   });
 };
+
+const ALLOWED_MODELS = new Set([
+  'gemini-3.8-flash',
+  'gemini-3.1-flash-lite',
+  'gemini-4-argon',
+]);
 
 export interface ChatRoleConfig {
   roleName: string;
@@ -125,10 +148,50 @@ app.get('/api/chat/roles', (_req: Request, res: Response) => {
 // POST /api/chat
 app.post('/api/chat', async (req: Request, res: Response) => {
   try {
-    const { messages, role = 'security_analyst', model, assessmentContext } = req.body;
+    const body = (req.body && typeof req.body === 'object' ? req.body : {}) as {
+      messages?: unknown;
+      role?: unknown;
+      model?: unknown;
+      assessmentContext?: any;
+    };
+    const { messages, role = 'security_analyst', model, assessmentContext } = body;
 
     if (!Array.isArray(messages) || messages.length === 0) {
       return res.status(400).json({ error: 'Messages array is required' });
+    }
+
+    // Normalize and validate conversation turns for Gemini API:
+    // - skip malformed/empty messages
+    // - drop leading 'model' turns so history always begins with 'user'
+    // - merge consecutive turns with the same role
+    const normalizedContents: Array<{ role: 'user' | 'model'; parts: Array<{ text: string }> }> = [];
+    for (const item of messages) {
+      if (!item || typeof item !== 'object') continue;
+      const rawRole = (item as { role?: unknown }).role;
+      const rawText = (item as { text?: unknown }).text;
+      if (typeof rawText !== 'string' || !rawText.trim()) continue;
+
+      const mappedRole: 'user' | 'model' =
+        rawRole === 'model' || rawRole === 'assistant' ? 'model' : 'user';
+      const trimmedText = rawText.trim();
+
+      if (normalizedContents.length === 0 && mappedRole === 'model') {
+        continue;
+      }
+
+      const prev = normalizedContents[normalizedContents.length - 1];
+      if (prev && prev.role === mappedRole) {
+        prev.parts[0].text += `\n\n${trimmedText}`;
+      } else {
+        normalizedContents.push({
+          role: mappedRole,
+          parts: [{ text: trimmedText }],
+        });
+      }
+    }
+
+    if (normalizedContents.length === 0) {
+      return res.status(400).json({ error: 'At least one non-empty user message is required' });
     }
 
     const ai = getAiClient();
@@ -138,12 +201,16 @@ app.post('/api/chat', async (req: Request, res: Response) => {
       });
     }
 
-    const roleConfig = SYSTEM_ROLES[role] || SYSTEM_ROLES.security_analyst;
-    const selectedModel = model || roleConfig.defaultModel;
+    const requestedRole = typeof role === 'string' && Object.prototype.hasOwnProperty.call(SYSTEM_ROLES, role)
+      ? role
+      : 'security_analyst';
+    const roleConfig = SYSTEM_ROLES[requestedRole];
+    const selectedModel =
+      typeof model === 'string' && ALLOWED_MODELS.has(model) ? model : roleConfig.defaultModel;
 
     let systemInstruction = roleConfig.prompt;
 
-    if (assessmentContext) {
+    if (assessmentContext && typeof assessmentContext === 'object') {
       systemInstruction += `\n\n[CURRENT ASSESSMENT TARGET CONTEXT]\nProject: ${assessmentContext.name || 'Assessment'}\nClient: ${assessmentContext.clientName || 'General Target'}\nTarget Domain: ${assessmentContext.rootDomain || 'N/A'}\nMode: ${assessmentContext.type || 'N/A'}\nStatus: ${assessmentContext.status || 'N/A'}\nAssets Discovered: ${assessmentContext.assetsCount ?? 0}\nSubdomains: ${assessmentContext.subdomainsCount ?? 0}\nEndpoints: ${assessmentContext.endpointsCount ?? 0}\nOpen Services: ${assessmentContext.servicesCount ?? 0}\nFindings Count: ${assessmentContext.findingsCount ?? 0}`;
 
       if (Array.isArray(assessmentContext.approvedHostnames) && assessmentContext.approvedHostnames.length > 0) {
@@ -157,15 +224,9 @@ app.post('/api/chat', async (req: Request, res: Response) => {
       }
     }
 
-    // Convert messages to GenAI contents format
-    const contents = messages.map((m: { role: string; text: string }) => ({
-      role: m.role === 'model' || m.role === 'assistant' ? 'model' : 'user',
-      parts: [{ text: m.text }],
-    }));
-
     const response = await ai.models.generateContent({
       model: selectedModel,
-      contents,
+      contents: normalizedContents,
       config: {
         systemInstruction,
       },
@@ -176,13 +237,13 @@ app.post('/api/chat', async (req: Request, res: Response) => {
     return res.json({
       text: replyText,
       model: selectedModel,
-      role,
+      role: requestedRole,
       roleName: roleConfig.roleName,
     });
   } catch (err: any) {
     console.error('Error in /api/chat:', err);
     return res.status(500).json({
-      error: err.message || 'Failed to generate response from Gemini API',
+      error: err?.message || 'Failed to generate response from Gemini API',
     });
   }
 });
@@ -192,8 +253,13 @@ app.get('/api/health', (_req: Request, res: Response) => {
   res.json({
     status: 'ok',
     timestamp: new Date().toISOString(),
-    hasApiKey: Boolean(process.env.GEMINI_API_KEY),
+    hasApiKey: Boolean(getConfiguredApiKey()),
   });
+});
+
+// Return JSON 404 for unknown /api routes before SPA / Vite fallbacks
+app.use('/api', (_req: Request, res: Response) => {
+  res.status(404).json({ error: 'API endpoint not found' });
 });
 
 // Start dev or production server

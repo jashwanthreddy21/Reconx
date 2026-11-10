@@ -26,9 +26,8 @@ import {
   XCircle,
   Clock,
   Bot,
-  Sparkles,
 } from 'lucide-react';
-import { UserRole, Assessment, AssessmentStatus } from '../../types';
+import { Assessment, AssessmentStatus } from '../../types';
 
 export type ActivePage =
   | 'dashboard'
@@ -247,10 +246,17 @@ export const AppShell: React.FC<AppShellProps> = ({
     }
   };
 
-  // Strictly identify if the current credentials belong to Administrator
-  const isAdmin = user?.email?.toLowerCase() === 'cybersafe07@gmail.com';
-  const roleDisplay = isAdmin ? 'ADMINISTRATOR' : 'SECURITY ANALYST';
-  const roleDisplayShort = isAdmin ? 'ADMIN' : 'ANALYST';
+  // Identify operator role badge (admin, researcher/viewer, or security analyst)
+  const isAdmin =
+    user?.email?.toLowerCase() === 'cybersafe07@gmail.com' ||
+    profile?.role === 'admin';
+  const isViewer = !isAdmin && profile?.role === 'viewer';
+  const roleDisplay = isAdmin
+    ? 'ADMINISTRATOR'
+    : isViewer
+    ? 'SECURITY RESEARCHER'
+    : 'SECURITY ANALYST';
+  const roleDisplayShort = isAdmin ? 'ADMIN' : isViewer ? 'VIEWER' : 'ANALYST';
 
   const navItems = [
     { id: 'dashboard' as ActivePage, label: 'Dashboard', icon: LayoutDashboard },
@@ -487,18 +493,20 @@ export const AppShell: React.FC<AppShellProps> = ({
                 className={`flex items-center gap-1.5 px-2 sm:px-2.5 py-1 text-[10px] sm:text-xs font-mono font-semibold rounded-md border ${
                   isAdmin
                     ? 'bg-rose-500/15 text-rose-300 border-rose-500/40 shadow-sm shadow-rose-900/30'
+                    : isViewer
+                    ? 'bg-cyan-500/15 text-cyan-300 border-cyan-500/40 shadow-sm shadow-cyan-900/30'
                     : 'bg-blue-500/15 text-blue-300 border-blue-500/40 shadow-sm shadow-blue-900/30'
                 }`}
                 title={
                   isAdmin
-                    ? 'Verified Administrator (cybersafe07@gmail.com)'
-                    : `Security Analyst (${user.email})`
+                    ? `Verified Administrator (${user.email})`
+                    : `${isViewer ? 'Security Researcher' : 'Security Analyst'} (${user.email})`
                 }
               >
                 {isAdmin ? (
                   <ShieldCheck className="w-3.5 h-3.5 text-rose-400 shrink-0" />
                 ) : (
-                  <Shield className="w-3.5 h-3.5 text-blue-400 shrink-0" />
+                  <Shield className={`w-3.5 h-3.5 ${isViewer ? 'text-cyan-400' : 'text-blue-400'} shrink-0`} />
                 )}
                 <span className="hidden sm:inline">{roleDisplay}</span>
                 <span className="sm:hidden">{roleDisplayShort}</span>
@@ -621,7 +629,11 @@ export const AppShell: React.FC<AppShellProps> = ({
             <div className="pt-4 border-t border-slate-800/80 text-[11px] text-slate-400 space-y-2">
               <div className="flex items-center justify-between">
                 <span>Current Role:</span>
-                <span className={`font-mono font-bold ${isAdmin ? 'text-rose-400' : 'text-blue-400'}`}>
+                <span
+                  className={`font-mono font-bold ${
+                    isAdmin ? 'text-rose-400' : isViewer ? 'text-cyan-400' : 'text-blue-400'
+                  }`}
+                >
                   {roleDisplay}
                 </span>
               </div>

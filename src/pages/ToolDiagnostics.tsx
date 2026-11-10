@@ -3,16 +3,9 @@ import { ToolDiagnosticInfo } from '../types';
 import {
   Wrench,
   CheckCircle2,
-  AlertTriangle,
   Terminal,
-  Cpu,
-  Layers,
-  Globe,
-  ExternalLink,
   Copy,
   Check,
-  ShieldCheck,
-  Server
 } from 'lucide-react';
 
 export const ToolDiagnostics: React.FC = () => {
@@ -81,10 +74,14 @@ export const ToolDiagnostics: React.FC = () => {
     },
   ];
 
-  const copyToClipboard = (text: string, id: string) => {
-    navigator.clipboard.writeText(text);
-    setCopiedCmd(id);
-    setTimeout(() => setCopiedCmd(null), 2000);
+  const copyToClipboard = async (text: string, id: string) => {
+    try {
+      await navigator.clipboard.writeText(text);
+      setCopiedCmd(id);
+      setTimeout(() => setCopiedCmd(null), 2000);
+    } catch (err) {
+      console.error('Failed to copy command to clipboard:', err);
+    }
   };
 
   return (
