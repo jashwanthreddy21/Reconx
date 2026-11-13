@@ -1,4 +1,4 @@
-import {
+import type {
   Assessment,
   Asset,
   DnsRecord,
@@ -8,8 +8,8 @@ import {
   AssessmentSnapshot,
   SnapshotAssetDigest,
   AssetChange,
-} from '../types';
-import { normalizeAssetValue, generateStableAssetId } from './assetCorrelationEngine';
+} from '../types/index.ts';
+import { normalizeAssetValue, generateStableAssetId } from './assetCorrelationEngine.ts';
 
 /**
  * Computes a deterministic string hash for asset metadata comparison across snapshots.

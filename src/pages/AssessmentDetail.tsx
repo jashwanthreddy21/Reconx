@@ -7,7 +7,9 @@ import {
   NetworkService,
   Finding,
   ScanJob,
-  FindingSeverity
+  FindingSeverity,
+  WebhookNotificationConfig,
+  WebhookSeverityThreshold,
 } from '../types';
 import { scannerOrchestrator } from '../services/scannerEngine';
 import { firestoreService } from '../services/firestoreService';
@@ -34,10 +36,21 @@ import {
   FileDown,
   Flame,
   List,
-  Loader2
+  Loader2,
+  Bell,
+  CheckCircle2,
+  Send,
+  X,
 } from 'lucide-react';
 import { generateAssessmentSummaryPdf } from '../services/pdfReportGenerator';
 import { SubdomainFindingsHeatmap } from '../components/heatmap/SubdomainFindingsHeatmap';
+import { calculateAssessmentRiskScore } from '../services/riskScoringEngine';
+import { WeightedRiskScoreCard } from '../components/assessment/WeightedRiskScoreCard';
+import {
+  dispatchSlackWebhookAlert,
+  filterAlertableFindings,
+  isValidSlackWebhookUrl,
+} from '../services/slackAlertService';
 
 interface Props {
   assessment: Assessment;
@@ -83,6 +96,34 @@ export const AssessmentDetail: React.FC<Props> = ({
   const [assetTypeFilter, setAssetTypeFilter] = useState<string>('all');
   const [dnsSearch, setDnsSearch] = useState('');
   const [findingSeverityFilter, setFindingSeverityFilter] = useState<string>('all');
+
+  // Automated Slack Webhook Alert Status & Settings
+  const [alertBanner, setAlertBanner] = useState<{
+    status: 'sending' | 'sent' | 'failed';
+    message: string;
+    timestamp: string;
+  } | null>(null);
+  const [webhookEnabled, setWebhookEnabled] = useState<boolean>(
+    Boolean(assessment.notificationConfig?.enabled)
+  );
+  const [webhookUrl, setWebhookUrl] = useState<string>(
+    assessment.notificationConfig?.webhookUrl || ''
+  );
+  const [webhookChannel, setWebhookChannel] = useState<string>(
+    assessment.notificationConfig?.channelName || '#secops-alerts'
+  );
+  const [webhookSeverity, setWebhookSeverity] = useState<WebhookSeverityThreshold>(
+    assessment.notificationConfig?.minSeverity || 'high'
+  );
+  const [webhookOnComplete, setWebhookOnComplete] = useState<boolean>(
+    Boolean(assessment.notificationConfig?.notifyOnScanComplete)
+  );
+  const [savingWebhook, setSavingWebhook] = useState(false);
+  const [testingWebhook, setTestingWebhook] = useState(false);
+  const [webhookFeedback, setWebhookFeedback] = useState<{
+    ok: boolean;
+    message: string;
+  } | null>(null);
 
   const mountedRef = useRef(true);
   const activeAssessmentIdRef = useRef(assessment.id);
@@ -130,6 +171,74 @@ export const AssessmentDetail: React.FC<Props> = ({
         .updateAssessment(targetId, { status: 'running' })
         .catch((err) => console.error('Failed updating status to running:', err));
     }
+
+    const alertedFindingIds = new Set<string>();
+    let webhookDispatchedDuringScan = false;
+    let latestWebhookMeta: Partial<WebhookNotificationConfig> = {};
+
+    const triggerSlackAlerts = async (
+      candidateFindings: Finding[],
+      options?: {
+        riskScore?: number;
+        riskTier?: FindingSeverity;
+        isCompletionSummary?: boolean;
+      }
+    ) => {
+      const cfg = targetAssessment.notificationConfig;
+      if (!cfg?.enabled || !cfg.webhookUrl?.trim()) return;
+
+      const freshAlerts = filterAlertableFindings(candidateFindings, cfg).filter(
+        (f) => !alertedFindingIds.has(f.id)
+      );
+
+      if (freshAlerts.length === 0 && !options?.isCompletionSummary) return;
+
+      freshAlerts.forEach((f) => alertedFindingIds.add(f.id));
+      webhookDispatchedDuringScan = true;
+
+      if (isStillActive()) {
+        setAlertBanner({
+          status: 'sending',
+          message:
+            freshAlerts.length > 0
+              ? `Dispatching Slack alert for ${freshAlerts.length} ${cfg.minSeverity.toUpperCase()}+ finding(s) to ${cfg.channelName || '#secops-alerts'}...`
+              : `Sending completion alert to ${cfg.channelName || '#secops-alerts'}...`,
+          timestamp: new Date().toISOString(),
+        });
+      }
+
+      const result = await dispatchSlackWebhookAlert({
+        assessment: targetAssessment,
+        findings: freshAlerts,
+        webhookConfig: cfg,
+        riskScore: options?.riskScore,
+        riskTier: options?.riskTier,
+        isTest: false,
+      });
+
+      latestWebhookMeta = {
+        lastAlertSentAt: result.deliveredAt,
+        lastAlertStatus: result.ok ? 'sent' : 'failed',
+        lastAlertError: result.ok ? undefined : result.message,
+        lastAlertCount: alertedFindingIds.size,
+      };
+
+      if (isStillActive()) {
+        setAlertBanner({
+          status: result.ok ? 'sent' : 'failed',
+          message: result.message,
+          timestamp: result.deliveredAt,
+        });
+      }
+
+      recordAudit(
+        targetAssessment,
+        result.ok ? 'SCAN_ALERT_DISPATCHED' : 'SCAN_ALERT_FAILED',
+        result.ok
+          ? `Slack webhook delivered (${alertedFindingIds.size} alertable findings) to ${cfg.channelName || '#secops-alerts'}`
+          : `Slack webhook delivery failed: ${result.message}`
+      );
+    };
 
     try {
       const results = await scannerOrchestrator.executePipeline(targetAssessment, {
@@ -218,12 +327,34 @@ export const AssessmentDetail: React.FC<Props> = ({
               .saveFindingsBatch(targetId, newFindings)
               .catch((err) => console.error('Failed saving findings batch:', err));
           }
+          triggerSlackAlerts(newFindings).catch((alertErr) =>
+            console.error('Slack webhook dispatch error:', alertErr)
+          );
         },
       });
 
       if (!isStillActive()) return;
 
-      // Update assessment stats
+      // Update assessment stats including weighted aggregate risk score
+      const riskProfile = results.riskProfile || calculateAssessmentRiskScore({
+        assessment: targetAssessment,
+        assets: results.assets,
+        services: results.services,
+        endpoints: results.endpoints,
+        findings: results.findings,
+      });
+
+      // Dispatch any final un-alerted high-severity findings or completion summary
+      if (targetAssessment.notificationConfig?.enabled) {
+        await triggerSlackAlerts(results.findings, {
+          riskScore: riskProfile.aggregateScore,
+          riskTier: riskProfile.severityTier,
+          isCompletionSummary:
+            Boolean(targetAssessment.notificationConfig.notifyOnScanComplete) &&
+            !webhookDispatchedDuringScan,
+        }).catch((alertErr) => console.error('Final Slack dispatch error:', alertErr));
+      }
+
       const finalStats = {
         assetsCount: results.assets.length,
         subdomainsCount: results.assets.filter((a) => a.assetType === 'subdomain').length,
@@ -232,25 +363,34 @@ export const AssessmentDetail: React.FC<Props> = ({
         servicesCount: results.services.length,
         technologiesCount: results.assets.filter((a) => a.assetType === 'technology').length,
         findingsCount: results.findings.length,
+        riskScore: riskProfile.aggregateScore,
+        riskLevel: riskProfile.severityTier,
+        riskBreakdown: riskProfile.subScores,
       };
+
+      const updatedNotificationConfig = targetAssessment.notificationConfig
+        ? { ...targetAssessment.notificationConfig, ...latestWebhookMeta }
+        : undefined;
 
       const completedAssessment: Assessment = {
         ...targetAssessment,
         status: 'completed',
         stats: finalStats,
+        notificationConfig: updatedNotificationConfig,
         updatedAt: new Date().toISOString(),
       };
       onUpdateAssessment(completedAssessment);
       recordAudit(
         targetAssessment,
         'SCAN_COMPLETED',
-        `Completed pipeline for ${targetAssessment.scope.rootDomain}: ${finalStats.assetsCount} assets, ${finalStats.findingsCount} findings`
+        `Completed pipeline for ${targetAssessment.scope.rootDomain}: ${finalStats.assetsCount} assets, ${finalStats.findingsCount} findings (Risk Score: ${riskProfile.aggregateScore}/100 ${riskProfile.severityTier.toUpperCase()})`
       );
       if (user) {
         await firestoreService
           .updateAssessment(targetId, {
             status: 'completed',
             stats: finalStats,
+            ...(updatedNotificationConfig ? { notificationConfig: updatedNotificationConfig } : {}),
           })
           .catch((err) => console.error('Failed updating completed assessment:', err));
       }
@@ -295,6 +435,13 @@ export const AssessmentDetail: React.FC<Props> = ({
     setFindings([]);
     setScanJobs([]);
     setIsScanning(false);
+    setAlertBanner(null);
+    setWebhookEnabled(Boolean(assessment.notificationConfig?.enabled));
+    setWebhookUrl(assessment.notificationConfig?.webhookUrl || '');
+    setWebhookChannel(assessment.notificationConfig?.channelName || '#secops-alerts');
+    setWebhookSeverity(assessment.notificationConfig?.minSeverity || 'high');
+    setWebhookOnComplete(Boolean(assessment.notificationConfig?.notifyOnScanComplete));
+    setWebhookFeedback(null);
 
     const load = async () => {
       setLoadingData(true);
@@ -342,6 +489,101 @@ export const AssessmentDetail: React.FC<Props> = ({
     setIsScanning(false);
   };
 
+  const handleSaveWebhookSettings = async () => {
+    setWebhookFeedback(null);
+    if (webhookEnabled) {
+      const check = isValidSlackWebhookUrl(webhookUrl);
+      if (!check.valid) {
+        setWebhookFeedback({
+          ok: false,
+          message: check.reason || 'Enter a valid Slack Webhook URL.',
+        });
+        return;
+      }
+    }
+
+    const nextConfig: WebhookNotificationConfig = {
+      enabled: webhookEnabled,
+      provider: 'slack',
+      webhookUrl: webhookUrl.trim(),
+      channelName: webhookChannel.trim() || '#secops-alerts',
+      minSeverity: webhookSeverity,
+      notifyOnScanComplete: webhookOnComplete,
+      lastAlertSentAt: assessment.notificationConfig?.lastAlertSentAt,
+      lastAlertStatus: assessment.notificationConfig?.lastAlertStatus,
+      lastAlertError: assessment.notificationConfig?.lastAlertError,
+      lastAlertCount: assessment.notificationConfig?.lastAlertCount,
+    };
+
+    setSavingWebhook(true);
+    try {
+      const updated: Assessment = {
+        ...assessment,
+        notificationConfig: nextConfig,
+        updatedAt: new Date().toISOString(),
+      };
+      onUpdateAssessment(updated);
+      if (user) {
+        await firestoreService.updateAssessment(assessment.id, {
+          notificationConfig: nextConfig,
+        });
+      }
+      recordAudit(
+        assessment,
+        'WEBHOOK_CONFIG_UPDATED',
+        `Updated Slack webhook alerts (${webhookEnabled ? `Enabled · ${webhookSeverity.toUpperCase()}+ -> ${nextConfig.channelName}` : 'Disabled'})`
+      );
+      setWebhookFeedback({
+        ok: true,
+        message: 'Slack webhook settings saved to assessment.',
+      });
+    } catch (err: any) {
+      setWebhookFeedback({
+        ok: false,
+        message: err?.message || 'Failed to persist Slack webhook settings.',
+      });
+    } finally {
+      setSavingWebhook(false);
+    }
+  };
+
+  const handleTestExistingWebhook = async () => {
+    setWebhookFeedback(null);
+    const check = isValidSlackWebhookUrl(webhookUrl);
+    if (!check.valid) {
+      setWebhookFeedback({
+        ok: false,
+        message: check.reason || 'Enter a valid Slack Webhook URL.',
+      });
+      return;
+    }
+
+    setTestingWebhook(true);
+    try {
+      const res = await dispatchSlackWebhookAlert({
+        assessment,
+        findings: [],
+        webhookConfig: {
+          enabled: true,
+          provider: 'slack',
+          webhookUrl: webhookUrl.trim(),
+          channelName: webhookChannel.trim() || '#secops-alerts',
+          minSeverity: webhookSeverity,
+          notifyOnScanComplete: webhookOnComplete,
+        },
+        isTest: true,
+      });
+      setWebhookFeedback({ ok: res.ok, message: res.message });
+    } catch (err: any) {
+      setWebhookFeedback({
+        ok: false,
+        message: err?.message || 'Test webhook delivery failed.',
+      });
+    } finally {
+      setTestingWebhook(false);
+    }
+  };
+
   // Export handlers
   const exportCsv = (type: 'assets' | 'dns' | 'endpoints' | 'services') => {
     let rows: any[] = [];
@@ -380,9 +622,59 @@ export const AssessmentDetail: React.FC<Props> = ({
     recordAudit(assessment, 'REPORT_EXPORTED', `Exported ${type.toUpperCase()} inventory CSV (${rows.length} rows)`);
   };
 
+  const riskProfile = React.useMemo(
+    () =>
+      calculateAssessmentRiskScore({
+        assessment,
+        assets,
+        services,
+        endpoints,
+        findings,
+      }),
+    [assessment, assets, services, endpoints, findings]
+  );
+
+  // Backfill riskScore on existing completed assessments in Firestore when loaded
+  useEffect(() => {
+    if (
+      loadingData ||
+      isScanning ||
+      assessment.status !== 'completed' ||
+      assets.length === 0
+    ) {
+      return;
+    }
+    if (
+      assessment.stats?.riskScore === undefined ||
+      assessment.stats?.riskScore !== riskProfile.aggregateScore
+    ) {
+      const updatedStats = {
+        ...assessment.stats,
+        riskScore: riskProfile.aggregateScore,
+        riskLevel: riskProfile.severityTier,
+        riskBreakdown: riskProfile.subScores,
+      };
+      onUpdateAssessment({ ...assessment, stats: updatedStats });
+      if (user) {
+        firestoreService
+          .updateAssessment(assessment.id, { stats: updatedStats })
+          .catch(() => {});
+      }
+    }
+  }, [
+    loadingData,
+    isScanning,
+    assessment.id,
+    assessment.status,
+    assets.length,
+    riskProfile.aggregateScore,
+    riskProfile.severityTier,
+  ]);
+
   const exportFullJson = () => {
     const fullPayload = {
       assessment,
+      riskProfile,
       assets,
       dnsRecords,
       endpoints,
@@ -408,7 +700,12 @@ export const AssessmentDetail: React.FC<Props> = ({
   const handleDownloadSummaryPdf = () => {
     generateAssessmentSummaryPdf({
       assessment,
+      assets,
+      dnsRecords,
+      endpoints,
+      services,
       findings,
+      riskProfile,
       totalFindingsCount: assessment.stats?.findingsCount || findings.length,
     });
     recordAudit(assessment, 'REPORT_EXPORTED', `Generated Summary PDF report for ${assessment.scope.rootDomain}`);
@@ -595,12 +892,58 @@ export const AssessmentDetail: React.FC<Props> = ({
         </div>
       </div>
 
+      {/* Live Slack Alert Delivery Banner */}
+      {alertBanner && (
+        <div
+          className={`rounded-xl border px-4 py-3 text-xs flex items-center justify-between gap-3 ${
+            alertBanner.status === 'sent'
+              ? 'bg-emerald-500/10 border-emerald-500/30 text-emerald-300'
+              : alertBanner.status === 'failed'
+              ? 'bg-rose-500/10 border-rose-500/30 text-rose-300'
+              : 'bg-cyan-500/10 border-cyan-500/30 text-cyan-300'
+          }`}
+        >
+          <div className="flex items-center gap-2.5">
+            {alertBanner.status === 'sending' ? (
+              <Loader2 className="w-4 h-4 animate-spin shrink-0 text-cyan-400" />
+            ) : alertBanner.status === 'sent' ? (
+              <CheckCircle2 className="w-4 h-4 shrink-0 text-emerald-400" />
+            ) : (
+              <AlertTriangle className="w-4 h-4 shrink-0 text-rose-400" />
+            )}
+            <span>
+              <strong className="font-semibold">Slack Alerting:</strong> {alertBanner.message}
+            </span>
+          </div>
+          <button
+            onClick={() => setAlertBanner(null)}
+            className="p-1 rounded-lg hover:bg-slate-800/60 text-slate-400 hover:text-white cursor-pointer"
+            aria-label="Dismiss Slack alert notice"
+          >
+            <X className="w-3.5 h-3.5" />
+          </button>
+        </div>
+      )}
+
       {/* TAB 1: OVERVIEW */}
       {activeTab === 'overview' && (
         <div className="space-y-6">
           {/* Quick Metrics */}
-          <div className="grid grid-cols-2 md:grid-cols-4 lg:grid-cols-6 gap-3">
+          <div className="grid grid-cols-2 md:grid-cols-4 lg:grid-cols-7 gap-3">
             {[
+              {
+                label: 'Weighted Risk',
+                value: `${riskProfile.aggregateScore}/100`,
+                icon: Shield,
+                color:
+                  riskProfile.aggregateScore >= 80
+                    ? 'text-rose-400'
+                    : riskProfile.aggregateScore >= 60
+                    ? 'text-orange-400'
+                    : riskProfile.aggregateScore >= 35
+                    ? 'text-amber-400'
+                    : 'text-emerald-400',
+              },
               { label: 'Total Assets', value: assets.length, icon: Server, color: 'text-cyan-400' },
               {
                 label: 'Subdomains',
@@ -618,10 +961,20 @@ export const AssessmentDetail: React.FC<Props> = ({
                   <span className="text-[11px] text-slate-400">{k.label}</span>
                   <k.icon className={`w-3.5 h-3.5 ${k.color}`} />
                 </div>
-                <div className="text-xl font-bold font-mono text-white">{k.value}</div>
+                <div className="text-xl font-bold font-mono tabular-nums text-white">{k.value}</div>
               </div>
             ))}
           </div>
+
+          {/* Weighted Risk-Scoring Engine Panel */}
+          <WeightedRiskScoreCard
+            assessment={assessment}
+            assets={assets}
+            services={services}
+            endpoints={endpoints}
+            findings={findings}
+            onNavigateTab={(t) => setActiveTab(t)}
+          />
 
           {/* Scanner Pipeline Status Cards */}
           <div className="bg-[#111827] border border-slate-800 rounded-xl p-5 shadow-lg">
@@ -1435,7 +1788,9 @@ export const AssessmentDetail: React.FC<Props> = ({
                 subdomains, <strong className="text-cyan-400 font-mono">{endpoints.length}</strong> active web endpoints, and{' '}
                 <strong className="text-cyan-400 font-mono">{services.length}</strong> observable network services. A total of{' '}
                 <strong className="text-amber-400 font-mono">{findings.length}</strong> observations and risk exposures were
-                cataloged.
+                cataloged, yielding a weighted aggregate severity score of{' '}
+                <strong className="text-white font-mono">{riskProfile.aggregateScore}/100 ({riskProfile.severityTier.toUpperCase()})</strong>{' '}
+                across open ports ({riskProfile.subScores.openPortsScore}/100), exposed services ({riskProfile.subScores.exposedServicesScore}/100), and vulnerabilities ({riskProfile.subScores.vulnerabilitiesScore}/100).
               </p>
             </div>
 
@@ -1554,6 +1909,165 @@ export const AssessmentDetail: React.FC<Props> = ({
               <span className="text-slate-500">Authorized Operator:</span>
               <span className="font-mono text-slate-200">{assessment.scope.authorizedBy || assessment.ownerEmail}</span>
             </div>
+          </div>
+
+          {/* Automated Slack Webhook Alerting Configuration */}
+          <div className="bg-slate-950 rounded-xl border border-slate-800 p-5 space-y-4">
+            <div className="flex items-start justify-between gap-4 border-b border-slate-800 pb-3">
+              <div>
+                <h4 className="text-sm font-semibold text-white flex items-center gap-2">
+                  <Bell className="w-4 h-4 text-cyan-400" />
+                  <span>Automated Slack Alerting (Webhook)</span>
+                </h4>
+                <p className="text-xs text-slate-400 mt-0.5">
+                  Dispatch automated Slack channel notifications whenever scans discover vulnerabilities meeting the threshold.
+                </p>
+              </div>
+              <label className="inline-flex items-center gap-2 cursor-pointer shrink-0 select-none">
+                <input
+                  type="checkbox"
+                  checked={webhookEnabled}
+                  onChange={(e) => {
+                    setWebhookEnabled(e.target.checked);
+                    setWebhookFeedback(null);
+                  }}
+                  className="sr-only peer"
+                />
+                <div className="w-9 h-5 bg-slate-800 border border-slate-700 peer-focus:outline-none rounded-full peer peer-checked:bg-cyan-600 relative transition-colors after:content-[''] after:absolute after:top-0.5 after:left-[2px] after:bg-white after:rounded-full after:h-3.5 after:w-3.5 after:transition-all peer-checked:after:translate-x-4" />
+                <span className="text-xs font-medium text-slate-300">
+                  {webhookEnabled ? 'Enabled' : 'Disabled'}
+                </span>
+              </label>
+            </div>
+
+            {assessment.notificationConfig?.lastAlertSentAt && (
+              <div className="text-[11px] font-mono text-slate-400 flex flex-wrap items-center gap-3">
+                <span>
+                  Last Dispatch:{' '}
+                  <span className="text-slate-200">
+                    {new Date(assessment.notificationConfig.lastAlertSentAt).toLocaleString()}
+                  </span>
+                </span>
+                <span>•</span>
+                <span
+                  className={
+                    assessment.notificationConfig.lastAlertStatus === 'sent'
+                      ? 'text-emerald-400'
+                      : 'text-rose-400'
+                  }
+                >
+                  Status: {(assessment.notificationConfig.lastAlertStatus || 'sent').toUpperCase()}
+                </span>
+                {typeof assessment.notificationConfig.lastAlertCount === 'number' && (
+                  <>
+                    <span>•</span>
+                    <span>Alerted Findings: {assessment.notificationConfig.lastAlertCount}</span>
+                  </>
+                )}
+              </div>
+            )}
+
+            <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
+              <div className="md:col-span-2">
+                <label className="block text-xs font-medium text-slate-300 mb-1">
+                  Slack Incoming Webhook URL
+                </label>
+                <input
+                  type="url"
+                  value={webhookUrl}
+                  onChange={(e) => setWebhookUrl(e.target.value)}
+                  placeholder="https://hooks.slack.com/services/WORKSPACE_ID/CHANNEL_ID/WEBHOOK_TOKEN"
+                  className="w-full px-3 py-2 bg-[#0b1120] border border-slate-700 rounded-xl text-xs font-mono text-cyan-300 placeholder-slate-600 focus:outline-none focus:border-cyan-500"
+                />
+              </div>
+
+              <div>
+                <label className="block text-xs font-medium text-slate-300 mb-1">
+                  Target Slack Channel
+                </label>
+                <input
+                  type="text"
+                  value={webhookChannel}
+                  onChange={(e) => setWebhookChannel(e.target.value)}
+                  placeholder="#secops-alerts"
+                  className="w-full px-3 py-2 bg-[#0b1120] border border-slate-700 rounded-xl text-xs font-mono text-slate-200 placeholder-slate-600 focus:outline-none focus:border-cyan-500"
+                />
+              </div>
+            </div>
+
+            <div className="flex flex-wrap items-center justify-between gap-4 pt-1">
+              <div className="flex flex-wrap items-center gap-3">
+                <span className="text-xs text-slate-400">Threshold:</span>
+                {(['critical', 'high', 'medium'] as WebhookSeverityThreshold[]).map((tier) => (
+                  <button
+                    key={tier}
+                    type="button"
+                    onClick={() => setWebhookSeverity(tier)}
+                    className={`px-2.5 py-1.5 rounded-lg text-[11px] font-medium border transition-all cursor-pointer ${
+                      webhookSeverity === tier
+                        ? 'bg-cyan-500/15 border-cyan-500/60 text-cyan-300 font-semibold'
+                        : 'bg-[#0b1120] border-slate-800 text-slate-400 hover:border-slate-700'
+                    }`}
+                  >
+                    {tier === 'critical' ? 'Critical Only' : tier === 'high' ? 'High & Critical' : 'Medium+'}
+                  </button>
+                ))}
+
+                <label className="flex items-center gap-2 text-xs text-slate-300 ml-2 cursor-pointer">
+                  <input
+                    type="checkbox"
+                    checked={webhookOnComplete}
+                    onChange={(e) => setWebhookOnComplete(e.target.checked)}
+                    className="rounded border-slate-700 text-cyan-500 focus:ring-cyan-500"
+                  />
+                  <span>Notify on scan completion</span>
+                </label>
+              </div>
+
+              <div className="flex items-center gap-2">
+                <button
+                  type="button"
+                  disabled={testingWebhook || !webhookUrl.trim()}
+                  onClick={handleTestExistingWebhook}
+                  className="flex items-center gap-1.5 px-3 py-2 bg-slate-800 hover:bg-slate-700 disabled:opacity-50 text-cyan-300 border border-slate-700 rounded-xl text-xs font-semibold cursor-pointer"
+                >
+                  {testingWebhook ? (
+                    <>
+                      <Loader2 className="w-3.5 h-3.5 animate-spin" /> Testing...
+                    </>
+                  ) : (
+                    <>
+                      <Send className="w-3.5 h-3.5" /> Test Webhook
+                    </>
+                  )}
+                </button>
+                <button
+                  type="button"
+                  disabled={savingWebhook}
+                  onClick={handleSaveWebhookSettings}
+                  className="flex items-center gap-1.5 px-4 py-2 bg-blue-600 hover:bg-blue-500 disabled:opacity-50 text-white rounded-xl text-xs font-semibold cursor-pointer"
+                >
+                  {savingWebhook ? 'Saving...' : 'Save Webhook Settings'}
+                </button>
+              </div>
+            </div>
+
+            {webhookFeedback && (
+              <div
+                className={`p-3 rounded-xl border text-xs flex items-center gap-2 ${
+                  webhookFeedback.ok
+                    ? 'bg-emerald-500/10 border-emerald-500/30 text-emerald-300'
+                    : 'bg-rose-500/10 border-rose-500/30 text-rose-300'
+                }`}
+              >
+                {webhookFeedback.ok ? (
+                  <CheckCircle2 className="w-4 h-4 shrink-0 text-emerald-400" />
+                ) : (
+                  <AlertTriangle className="w-4 h-4 shrink-0 text-rose-400" />
+                )}
+                <span>{webhookFeedback.message}</span>
+              </div>
+            )}
           </div>
         </div>
       )}

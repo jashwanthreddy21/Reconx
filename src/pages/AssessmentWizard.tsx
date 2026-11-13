@@ -1,6 +1,17 @@
 import React, { useState } from 'react';
-import { Assessment, ScopeRule, ToolConfig, AssessmentType } from '../types';
+import {
+  Assessment,
+  ScopeRule,
+  ToolConfig,
+  AssessmentType,
+  WebhookNotificationConfig,
+  WebhookSeverityThreshold,
+} from '../types';
 import { useAuth } from '../context/AuthContext';
+import {
+  dispatchSlackWebhookAlert,
+  isValidSlackWebhookUrl,
+} from '../services/slackAlertService';
 import {
   Shield,
   AlertTriangle,
@@ -10,6 +21,9 @@ import {
   FileCheck,
   Lock,
   Loader2,
+  Bell,
+  Send,
+  CheckCircle2,
 } from 'lucide-react';
 
 interface Props {
@@ -58,6 +72,18 @@ export const AssessmentWizard: React.FC<Props> = ({ onAssessmentCreated, onCance
   const [executionEnvironment, setExecutionEnvironment] = useState<
     'in_browser_doh' | 'local_cli_agent' | 'lab_simulation'
   >('in_browser_doh');
+
+  // Automated Slack Webhook Notifications
+  const [webhookEnabled, setWebhookEnabled] = useState(false);
+  const [slackWebhookUrl, setSlackWebhookUrl] = useState('');
+  const [slackChannelName, setSlackChannelName] = useState('#secops-alerts');
+  const [webhookMinSeverity, setWebhookMinSeverity] = useState<WebhookSeverityThreshold>('high');
+  const [notifyOnScanComplete, setNotifyOnScanComplete] = useState(false);
+  const [testingWebhook, setTestingWebhook] = useState(false);
+  const [testWebhookStatus, setTestWebhookStatus] = useState<{
+    ok: boolean;
+    message: string;
+  } | null>(null);
 
   // Validation
   const [error, setError] = useState<string | null>(null);
@@ -139,7 +165,63 @@ export const AssessmentWizard: React.FC<Props> = ({ onAssessmentCreated, onCance
         setError('Select at least one DNS record type when dnsx is enabled.');
         return;
       }
+      if (webhookEnabled) {
+        const check = isValidSlackWebhookUrl(slackWebhookUrl);
+        if (!check.valid) {
+          setError(check.reason || 'Enter a valid Slack Webhook URL.');
+          return;
+        }
+      }
       setStep(5);
+    }
+  };
+
+  const handleTestSlackWebhook = async () => {
+    setError(null);
+    setTestWebhookStatus(null);
+    const check = isValidSlackWebhookUrl(slackWebhookUrl);
+    if (!check.valid) {
+      setTestWebhookStatus({
+        ok: false,
+        message: check.reason || 'Invalid Slack webhook URL.',
+      });
+      return;
+    }
+
+    setTestingWebhook(true);
+    try {
+      const res = await dispatchSlackWebhookAlert({
+        assessment: {
+          id: 'wizard_preview',
+          name: name.trim() || 'ReconX New Assessment',
+          clientName: clientName.trim() || 'Target Organization',
+          scope: {
+            rootDomain: rootDomain.trim().toLowerCase() || 'target.example.com',
+            authorizationConfirmed: authConfirmed,
+          },
+        },
+        findings: [],
+        webhookConfig: {
+          enabled: true,
+          provider: 'slack',
+          webhookUrl: slackWebhookUrl.trim(),
+          channelName: slackChannelName.trim() || '#secops-alerts',
+          minSeverity: webhookMinSeverity,
+          notifyOnScanComplete,
+        },
+        isTest: true,
+      });
+      setTestWebhookStatus({
+        ok: res.ok,
+        message: res.message,
+      });
+    } catch (err: any) {
+      setTestWebhookStatus({
+        ok: false,
+        message: err?.message || 'Failed to send test Slack notification.',
+      });
+    } finally {
+      setTestingWebhook(false);
     }
   };
 
@@ -191,6 +273,17 @@ export const AssessmentWizard: React.FC<Props> = ({ onAssessmentCreated, onCance
       executionEnvironment,
     };
 
+    const notificationConfig: WebhookNotificationConfig | undefined = webhookEnabled
+      ? {
+          enabled: true,
+          provider: 'slack',
+          webhookUrl: slackWebhookUrl.trim(),
+          channelName: slackChannelName.trim() || '#secops-alerts',
+          minSeverity: webhookMinSeverity,
+          notifyOnScanComplete,
+        }
+      : undefined;
+
     const newAssessment: Assessment = {
       id: `recon_${Date.now()}_${Math.random().toString(36).substring(2, 7)}`,
       name: name.trim(),
@@ -202,6 +295,7 @@ export const AssessmentWizard: React.FC<Props> = ({ onAssessmentCreated, onCance
       status: 'queued',
       scope: newScope,
       toolConfig: newConfig,
+      notificationConfig,
       stats: {
         assetsCount: 0,
         subdomainsCount: 0,
@@ -752,6 +846,145 @@ export const AssessmentWizard: React.FC<Props> = ({ onAssessmentCreated, onCance
               </div>
             </div>
           </div>
+
+          {/* Automated Slack Webhook Alerting Configuration */}
+          <div className="border-t border-slate-800 pt-5 space-y-4">
+            <div className="flex items-start justify-between gap-4">
+              <div>
+                <h4 className="text-sm font-semibold text-white flex items-center gap-2">
+                  <Bell className="w-4 h-4 text-cyan-400" />
+                  <span>Automated Slack Alerting (Webhook)</span>
+                </h4>
+                <p className="text-[11px] text-slate-400 mt-0.5">
+                  Send real-time Block Kit notifications to a Slack channel when high-severity vulnerabilities are discovered during a scan.
+                </p>
+              </div>
+              <label className="inline-flex items-center gap-2 cursor-pointer shrink-0 select-none">
+                <input
+                  type="checkbox"
+                  checked={webhookEnabled}
+                  onChange={(e) => {
+                    setWebhookEnabled(e.target.checked);
+                    setTestWebhookStatus(null);
+                  }}
+                  className="sr-only peer"
+                />
+                <div className="w-9 h-5 bg-slate-800 border border-slate-700 peer-focus:outline-none rounded-full peer peer-checked:bg-cyan-600 relative transition-colors after:content-[''] after:absolute after:top-0.5 after:left-[2px] after:bg-white after:rounded-full after:h-3.5 after:w-3.5 after:transition-all peer-checked:after:translate-x-4" />
+                <span className="text-xs font-medium text-slate-300">
+                  {webhookEnabled ? 'Enabled' : 'Disabled'}
+                </span>
+              </label>
+            </div>
+
+            {webhookEnabled && (
+              <div className="p-4 bg-slate-950 border border-slate-800 rounded-xl space-y-4">
+                <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
+                  <div className="md:col-span-2">
+                    <label className="block text-xs font-medium text-slate-300 mb-1">
+                      Slack Incoming Webhook URL <span className="text-rose-400">*</span>
+                    </label>
+                    <input
+                      type="url"
+                      value={slackWebhookUrl}
+                      onChange={(e) => {
+                        setSlackWebhookUrl(e.target.value);
+                        setTestWebhookStatus(null);
+                      }}
+                      placeholder="https://hooks.slack.com/services/WORKSPACE_ID/CHANNEL_ID/WEBHOOK_TOKEN"
+                      className="w-full px-3 py-2 bg-[#0b1120] border border-slate-700 rounded-xl text-xs font-mono text-cyan-300 placeholder-slate-600 focus:outline-none focus:border-cyan-500"
+                    />
+                  </div>
+
+                  <div>
+                    <label className="block text-xs font-medium text-slate-300 mb-1">
+                      Target Slack Channel
+                    </label>
+                    <input
+                      type="text"
+                      value={slackChannelName}
+                      onChange={(e) => setSlackChannelName(e.target.value)}
+                      placeholder="#secops-alerts"
+                      className="w-full px-3 py-2 bg-[#0b1120] border border-slate-700 rounded-xl text-xs font-mono text-slate-200 placeholder-slate-600 focus:outline-none focus:border-cyan-500"
+                    />
+                  </div>
+                </div>
+
+                <div className="grid grid-cols-1 md:grid-cols-2 gap-4 items-end">
+                  <div>
+                    <label className="block text-xs font-medium text-slate-300 mb-1.5">
+                      Minimum Severity Threshold
+                    </label>
+                    <div className="grid grid-cols-3 gap-2">
+                      {[
+                        { id: 'critical' as WebhookSeverityThreshold, label: 'Critical Only' },
+                        { id: 'high' as WebhookSeverityThreshold, label: 'High & Critical' },
+                        { id: 'medium' as WebhookSeverityThreshold, label: 'Medium+' },
+                      ].map((tier) => (
+                        <button
+                          key={tier.id}
+                          type="button"
+                          onClick={() => setWebhookMinSeverity(tier.id)}
+                          className={`px-2.5 py-2 rounded-lg text-[11px] font-medium border transition-all cursor-pointer ${
+                            webhookMinSeverity === tier.id
+                              ? 'bg-cyan-500/15 border-cyan-500/60 text-cyan-300 font-semibold'
+                              : 'bg-[#0b1120] border-slate-800 text-slate-400 hover:border-slate-700'
+                          }`}
+                        >
+                          {tier.label}
+                        </button>
+                      ))}
+                    </div>
+                  </div>
+
+                  <div className="flex flex-wrap items-center justify-between gap-3">
+                    <label className="flex items-center gap-2 text-xs text-slate-300 cursor-pointer">
+                      <input
+                        type="checkbox"
+                        checked={notifyOnScanComplete}
+                        onChange={(e) => setNotifyOnScanComplete(e.target.checked)}
+                        className="rounded border-slate-700 text-cyan-500 focus:ring-cyan-500"
+                      />
+                      <span>Also notify on scan completion</span>
+                    </label>
+
+                    <button
+                      type="button"
+                      disabled={testingWebhook}
+                      onClick={handleTestSlackWebhook}
+                      className="flex items-center gap-1.5 px-3.5 py-2 bg-slate-800 hover:bg-slate-700 disabled:opacity-50 text-cyan-300 border border-slate-700 rounded-xl text-xs font-semibold transition-all cursor-pointer"
+                    >
+                      {testingWebhook ? (
+                        <>
+                          <Loader2 className="w-3.5 h-3.5 animate-spin" /> Sending Test...
+                        </>
+                      ) : (
+                        <>
+                          <Send className="w-3.5 h-3.5" /> Send Test Alert
+                        </>
+                      )}
+                    </button>
+                  </div>
+                </div>
+
+                {testWebhookStatus && (
+                  <div
+                    className={`p-3 rounded-xl border text-xs flex items-center gap-2 ${
+                      testWebhookStatus.ok
+                        ? 'bg-emerald-500/10 border-emerald-500/30 text-emerald-300'
+                        : 'bg-rose-500/10 border-rose-500/30 text-rose-300'
+                    }`}
+                  >
+                    {testWebhookStatus.ok ? (
+                      <CheckCircle2 className="w-4 h-4 shrink-0 text-emerald-400" />
+                    ) : (
+                      <AlertTriangle className="w-4 h-4 shrink-0 text-rose-400" />
+                    )}
+                    <span>{testWebhookStatus.message}</span>
+                  </div>
+                )}
+              </div>
+            )}
+          </div>
         </div>
       )}
 
@@ -790,6 +1023,14 @@ export const AssessmentWizard: React.FC<Props> = ({ onAssessmentCreated, onCance
             <div className="flex justify-between border-b border-slate-800/80 pb-2">
               <span className="text-slate-500">Execution Mode:</span>
               <span className="font-mono text-emerald-400">{executionEnvironment}</span>
+            </div>
+            <div className="flex justify-between border-b border-slate-800/80 pb-2">
+              <span className="text-slate-500">Slack Webhook Alerts:</span>
+              <span className={`font-mono ${webhookEnabled ? 'text-cyan-300' : 'text-slate-500'}`}>
+                {webhookEnabled
+                  ? `Enabled · ${webhookMinSeverity.toUpperCase()}+ -> ${slackChannelName || '#secops-alerts'}`
+                  : 'Disabled'}
+              </span>
             </div>
             <div className="flex justify-between">
               <span className="text-slate-500">ROE Reference:</span>

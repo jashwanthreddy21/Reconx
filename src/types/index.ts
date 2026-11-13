@@ -54,6 +54,60 @@ export interface ToolConfig {
   executionEnvironment?: 'in_browser_doh' | 'local_cli_agent' | 'lab_simulation';
 }
 
+export interface RiskScoreWeights {
+  openPorts: number;
+  exposedServices: number;
+  vulnerabilities: number;
+}
+
+export interface RiskFactorAttribution {
+  id: string;
+  pillar: 'open_ports' | 'exposed_services' | 'vulnerabilities';
+  label: string;
+  evidence: string;
+  severity: FindingSeverity;
+  rawPoints: number;
+  weightedContribution: number;
+}
+
+export interface AssetRiskBreakdown {
+  assetKey: string;
+  assetType: AssetType | 'host';
+  score: number;
+  severity: FindingSeverity;
+  openPorts: number[];
+  exposedServicesCount: number;
+  findingsCount: number;
+  topReason: string;
+}
+
+export interface AssessmentRiskProfile {
+  aggregateScore: number; // 0 - 100 weighted aggregate severity score
+  severityTier: FindingSeverity;
+  weights: RiskScoreWeights;
+  subScores: {
+    openPortsScore: number; // 0 - 100
+    exposedServicesScore: number; // 0 - 100
+    vulnerabilitiesScore: number; // 0 - 100
+  };
+  weightedContributions: {
+    openPortsPoints: number;
+    exposedServicesPoints: number;
+    vulnerabilitiesPoints: number;
+  };
+  metrics: {
+    openPortsTotal: number;
+    highRiskPortsCount: number;
+    exposedServicesTotal: number;
+    cleartextOrVersionExposedCount: number;
+    findingsTotal: number;
+    findingsBySeverity: Record<FindingSeverity, number>;
+  };
+  topFactors: RiskFactorAttribution[];
+  highestRiskAssets: AssetRiskBreakdown[];
+  computedAt: string;
+}
+
 export interface AssessmentStats {
   totalAssets?: number;
   assetsCount?: number;
@@ -69,6 +123,28 @@ export interface AssessmentStats {
   findingsCount: number;
   relationshipsCount?: number;
   potentiallyExposedCount?: number;
+  riskScore?: number;
+  riskLevel?: FindingSeverity;
+  riskBreakdown?: {
+    openPortsScore: number;
+    exposedServicesScore: number;
+    vulnerabilitiesScore: number;
+  };
+}
+
+export type WebhookSeverityThreshold = 'critical' | 'high' | 'medium';
+
+export interface WebhookNotificationConfig {
+  enabled: boolean;
+  provider: 'slack';
+  webhookUrl: string;
+  channelName?: string;
+  minSeverity: WebhookSeverityThreshold;
+  notifyOnScanComplete?: boolean;
+  lastAlertSentAt?: string;
+  lastAlertStatus?: 'sent' | 'failed';
+  lastAlertError?: string;
+  lastAlertCount?: number;
 }
 
 export interface Assessment {
@@ -83,6 +159,7 @@ export interface Assessment {
   scope: ScopeRule;
   toolConfig: ToolConfig;
   stats: AssessmentStats;
+  notificationConfig?: WebhookNotificationConfig;
   isDemo?: boolean;
   createdAt: string;
   updatedAt: string;
@@ -96,6 +173,33 @@ export type AssetType =
   | 'endpoint'
   | 'service'
   | 'technology';
+
+export type GeoRegionId =
+  | 'north-america'
+  | 'europe'
+  | 'asia-pacific'
+  | 'latin-america'
+  | 'middle-east-africa'
+  | 'internal'
+  | 'unassigned';
+
+export interface IpGeoLocation {
+  ip: string;
+  isExternal: boolean;
+  country: string;
+  countryCode: string;
+  regionName?: string;
+  city?: string;
+  continent: string;
+  geoRegionId: GeoRegionId;
+  geoRegionLabel: string;
+  isp?: string;
+  asn?: string;
+  lat?: number;
+  lon?: number;
+  source: 'ip-api' | 'ipwho.is' | 'private_network' | 'rir_allocation';
+  resolvedAt: string;
+}
 
 export interface Asset {
   id: string;
@@ -122,6 +226,7 @@ export interface Asset {
   detectedServices?: string[];
   detectedTechnologies?: string[];
   associatedDomains?: string[];
+  geoLocation?: IpGeoLocation;
   metadata?: Record<string, any>;
 }
 

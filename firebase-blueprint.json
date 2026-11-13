@@ -80,6 +80,10 @@
           "type": "object",
           "description": "Summary counts of discovered assets"
         },
+        "notificationConfig": {
+          "type": "object",
+          "description": "Slack webhook alerting configuration for high-severity findings"
+        },
         "createdAt": {
           "type": "string",
           "description": "Creation timestamp"

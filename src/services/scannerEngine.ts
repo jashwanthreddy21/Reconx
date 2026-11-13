@@ -11,9 +11,11 @@ import {
   AssetEvidence,
   AssetCorrelation,
   AssessmentSnapshot,
+  AssessmentRiskProfile,
 } from '../types';
 import { runAssetCorrelationEngine } from './assetCorrelationEngine';
 import { createAssessmentSnapshot } from './changeDetectionEngine';
+import { calculateAssessmentRiskScore } from './riskScoringEngine';
 
 export interface ScannerProgressCallback {
   onJobUpdate: (job: ScanJob) => void;
@@ -105,6 +107,7 @@ export class ScannerOrchestrator {
     evidences: AssetEvidence[];
     correlation: AssetCorrelation;
     snapshot: AssessmentSnapshot;
+    riskProfile: AssessmentRiskProfile;
   }> {
     this.abortController = new AbortController();
     const signal = this.abortController.signal;
@@ -878,6 +881,14 @@ export class ScannerOrchestrator {
       discoveredServices
     );
 
+    const riskProfile = calculateAssessmentRiskScore({
+      assessment,
+      assets: corr.normalizedAssets,
+      services: discoveredServices,
+      endpoints: discoveredEndpoints,
+      findings: generatedFindings,
+    });
+
     return {
       assets: corr.normalizedAssets,
       dnsRecords: discoveredDns,
@@ -889,6 +900,7 @@ export class ScannerOrchestrator {
       evidences: corr.evidences,
       correlation: corr.correlationSummary,
       snapshot,
+      riskProfile,
     };
   }
 
@@ -910,6 +922,7 @@ export class ScannerOrchestrator {
     evidences: AssetEvidence[];
     correlation: AssetCorrelation;
     snapshot: AssessmentSnapshot;
+    riskProfile: AssessmentRiskProfile;
   }> {
     const rootDomain = (assessment.scope.rootDomain || 'juiceshop.lab.internal')
       .trim()
@@ -1808,6 +1821,14 @@ export class ScannerOrchestrator {
       services
     );
 
+    const riskProfile = calculateAssessmentRiskScore({
+      assessment,
+      assets: corr.normalizedAssets,
+      services,
+      endpoints,
+      findings,
+    });
+
     return {
       assets: corr.normalizedAssets,
       dnsRecords,
@@ -1819,6 +1840,7 @@ export class ScannerOrchestrator {
       evidences: corr.evidences,
       correlation: corr.correlationSummary,
       snapshot,
+      riskProfile,
     };
   }
 }

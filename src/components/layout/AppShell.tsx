@@ -26,8 +26,16 @@ import {
   XCircle,
   Clock,
   Bot,
+  Loader2,
+  Server,
 } from 'lucide-react';
 import { Assessment, AssessmentStatus } from '../../types';
+import {
+  getCachedSubdomainMap,
+  loadGlobalSubdomainIndex,
+  queryGlobalSearchIndex,
+  SubdomainSearchEntry,
+} from '../../services/globalSearchService';
 
 export type ActivePage =
   | 'dashboard'
@@ -70,7 +78,12 @@ export const AppShell: React.FC<AppShellProps> = ({
   // Global search input state
   const [localSearch, setLocalSearch] = useState('');
   const [isSearchOpen, setIsSearchOpen] = useState(false);
+  const [searchScopeTab, setSearchScopeTab] = useState<'all' | 'assessments' | 'subdomains'>('all');
   const [highlightedIndex, setHighlightedIndex] = useState(-1);
+  const [subdomainsByAssessment, setSubdomainsByAssessment] = useState<
+    Record<string, SubdomainSearchEntry[]>
+  >({});
+  const [isIndexingSubdomains, setIsIndexingSubdomains] = useState(false);
   const searchContainerRef = useRef<HTMLDivElement>(null);
   const searchInputRef = useRef<HTMLInputElement>(null);
 
@@ -81,20 +94,68 @@ export const AppShell: React.FC<AppShellProps> = ({
     onSearchChange?.(val);
   };
 
-  // Filter assessments by client name or domain (rootDomain / approved hostnames) or name
-  const filteredAssessments = useMemo(() => {
-    const q = currentQuery.trim().toLowerCase();
-    if (!q || !assessments || assessments.length === 0) return [];
-    return assessments.filter((a) => {
-      const clientMatch = a.clientName?.toLowerCase().includes(q);
-      const domainMatch = a.scope?.rootDomain?.toLowerCase().includes(q);
-      const nameMatch = a.name?.toLowerCase().includes(q);
-      const hostnamesMatch = a.scope?.approvedHostnames?.some((h) =>
-        h.toLowerCase().includes(q)
-      );
-      return clientMatch || domainMatch || nameMatch || hostnamesMatch;
-    });
-  }, [assessments, currentQuery]);
+  // Keep instant synchronous cache snapshot synced whenever assessments update
+  useEffect(() => {
+    if (assessments.length === 0) {
+      setSubdomainsByAssessment({});
+      return;
+    }
+    setSubdomainsByAssessment(getCachedSubdomainMap(assessments));
+  }, [assessments]);
+
+  // Lazily index discovered subdomains from Firestore when user focuses or queries global search
+  useEffect(() => {
+    if ((!isSearchOpen && !currentQuery.trim()) || assessments.length === 0) {
+      return;
+    }
+    let cancelled = false;
+    setIsIndexingSubdomains(true);
+
+    loadGlobalSubdomainIndex(assessments)
+      .then((indexedMap) => {
+        if (!cancelled) {
+          setSubdomainsByAssessment(indexedMap);
+        }
+      })
+      .finally(() => {
+        if (!cancelled) {
+          setIsIndexingSubdomains(false);
+        }
+      });
+
+    return () => {
+      cancelled = true;
+    };
+  }, [isSearchOpen, currentQuery, assessments]);
+
+  const totalIndexedSubdomains = useMemo(() => {
+    return Object.values(subdomainsByAssessment).reduce(
+      (sum, list) => sum + list.length,
+      0
+    );
+  }, [subdomainsByAssessment]);
+
+  // Execute unified search across assessment names, clients, root domains, and discovered subdomains
+  const searchResults = useMemo(() => {
+    return queryGlobalSearchIndex(currentQuery, assessments, subdomainsByAssessment);
+  }, [currentQuery, assessments, subdomainsByAssessment]);
+
+  const visibleAssessmentHits = useMemo(() => {
+    if (searchScopeTab === 'subdomains') return [];
+    return searchResults.assessmentHits;
+  }, [searchResults.assessmentHits, searchScopeTab]);
+
+  const visibleSubdomainHits = useMemo(() => {
+    if (searchScopeTab === 'assessments') return [];
+    return searchResults.subdomainHits.slice(0, 25);
+  }, [searchResults.subdomainHits, searchScopeTab]);
+
+  const flatSelectableAssessmentIds = useMemo(() => {
+    return [
+      ...visibleAssessmentHits.map((h) => h.assessment.id),
+      ...visibleSubdomainHits.map((h) => h.entry.assessmentId),
+    ];
+  }, [visibleAssessmentHits, visibleSubdomainHits]);
 
   // Click outside listener for search dropdown
   useEffect(() => {
@@ -138,7 +199,7 @@ export const AppShell: React.FC<AppShellProps> = ({
 
   // Keyboard navigation inside search dropdown
   const handleInputKeyDown = (e: React.KeyboardEvent<HTMLInputElement>) => {
-    if (!isSearchOpen || filteredAssessments.length === 0) {
+    if (!isSearchOpen || flatSelectableAssessmentIds.length === 0) {
       if (e.key === 'ArrowDown') {
         setIsSearchOpen(true);
       }
@@ -148,21 +209,21 @@ export const AppShell: React.FC<AppShellProps> = ({
     if (e.key === 'ArrowDown') {
       e.preventDefault();
       setHighlightedIndex((prev) =>
-        prev < filteredAssessments.length - 1 ? prev + 1 : 0
+        prev < flatSelectableAssessmentIds.length - 1 ? prev + 1 : 0
       );
     } else if (e.key === 'ArrowUp') {
       e.preventDefault();
       setHighlightedIndex((prev) =>
-        prev > 0 ? prev - 1 : filteredAssessments.length - 1
+        prev > 0 ? prev - 1 : flatSelectableAssessmentIds.length - 1
       );
     } else if (e.key === 'Enter') {
       e.preventDefault();
-      const target =
+      const targetId =
         highlightedIndex >= 0
-          ? filteredAssessments[highlightedIndex]
-          : filteredAssessments[0];
-      if (target) {
-        handleSelectAssessment(target.id);
+          ? flatSelectableAssessmentIds[highlightedIndex]
+          : flatSelectableAssessmentIds[0];
+      if (targetId) {
+        handleSelectAssessment(targetId);
       }
     } else if (e.key === 'Escape') {
       setIsSearchOpen(false);
@@ -345,14 +406,12 @@ export const AppShell: React.FC<AppShellProps> = ({
                 setHighlightedIndex(-1);
               }}
               onFocus={() => {
-                if (currentQuery.trim()) {
-                  setIsSearchOpen(true);
-                }
+                setIsSearchOpen(true);
               }}
               onKeyDown={handleInputKeyDown}
-              placeholder="Search assessments by client or domain..."
+              placeholder="Search assessments, clients, or subdomains..."
               className="w-full pl-8 sm:pl-9 pr-12 sm:pr-20 py-1.5 text-xs bg-slate-900/90 hover:bg-slate-900 focus:bg-slate-950 border border-slate-700/80 focus:border-cyan-500/80 rounded-lg text-slate-200 placeholder:text-slate-500 focus:outline-none focus:ring-1 focus:ring-cyan-500/40 transition-all shadow-inner"
-              aria-label="Filter assessments by client name or domain"
+              aria-label="Global search across assessment names, clients, and discovered subdomains"
             />
             <div className="absolute right-1.5 sm:right-2 flex items-center gap-1">
               {currentQuery ? (
@@ -375,89 +434,301 @@ export const AppShell: React.FC<AppShellProps> = ({
             </div>
           </div>
 
-          {/* Search Dropdown / Live Results Flyout */}
-          {isSearchOpen && currentQuery.trim().length > 0 && (
-            <div className="absolute left-0 right-0 sm:right-auto sm:w-[480px] lg:w-[540px] top-full mt-2 bg-[#111827] border border-slate-700/90 rounded-xl shadow-2xl shadow-black/90 z-50 overflow-hidden divide-y divide-slate-800 backdrop-blur-md">
+          {/* Search Dropdown / Unified Global Search Flyout */}
+          {isSearchOpen && (
+            <div className="absolute left-0 right-0 sm:right-auto sm:w-[520px] lg:w-[600px] top-full mt-2 bg-[#111827] border border-slate-700/90 rounded-xl shadow-2xl shadow-black/90 z-50 overflow-hidden divide-y divide-slate-800 backdrop-blur-md">
               {/* Dropdown Header */}
-              <div className="px-3.5 py-2 bg-slate-900/90 flex items-center justify-between text-[11px] text-slate-400">
-                <span className="font-medium text-slate-300">
-                  Assessments matching <strong className="text-cyan-400 font-mono">"{currentQuery.trim()}"</strong>
-                </span>
-                <span className="font-mono text-[10px] px-1.5 py-0.2 bg-slate-800 text-slate-300 rounded border border-slate-700">
-                  {filteredAssessments.length} found
+              <div className="px-3.5 py-2.5 bg-slate-900/90 flex flex-wrap items-center justify-between gap-2 text-[11px] text-slate-400">
+                <div className="flex items-center gap-2 min-w-0">
+                  {currentQuery.trim() ? (
+                    <span className="font-medium text-slate-300 truncate">
+                      Global matches for{' '}
+                      <strong className="text-cyan-400 font-mono">
+                        "{currentQuery.trim()}"
+                      </strong>
+                    </span>
+                  ) : (
+                    <span className="font-medium text-slate-300">
+                      Global Recon Index
+                    </span>
+                  )}
+                  {isIndexingSubdomains && (
+                    <span className="inline-flex items-center gap-1 text-[10px] font-mono text-cyan-400 shrink-0">
+                      <Loader2 className="w-3 h-3 animate-spin" />
+                      Indexing subdomains...
+                    </span>
+                  )}
+                </div>
+                <span className="font-mono tabular-nums text-[11px] text-slate-400 whitespace-nowrap shrink-0">
+                  {currentQuery.trim()
+                    ? `${searchResults.assessmentHits.length} assessments · ${searchResults.subdomainHits.length} subdomains`
+                    : `${assessments.length} assessments · ${totalIndexedSubdomains} subdomains`}
                 </span>
               </div>
 
-              {/* Results List */}
-              <div className="max-h-80 overflow-y-auto divide-y divide-slate-800/60">
-                {filteredAssessments.length > 0 ? (
-                  filteredAssessments.map((a, idx) => {
-                    const isHighlighted = idx === highlightedIndex;
+              {/* Category Tabs when query is active */}
+              {currentQuery.trim().length > 0 && (
+                <div className="px-3.5 py-2 bg-slate-950/60 flex items-center gap-1.5">
+                  {[
+                    {
+                      id: 'all' as const,
+                      label: 'All Matches',
+                      count: searchResults.totalHits,
+                    },
+                    {
+                      id: 'assessments' as const,
+                      label: 'Assessments & Clients',
+                      count: searchResults.assessmentHits.length,
+                    },
+                    {
+                      id: 'subdomains' as const,
+                      label: 'Discovered Subdomains',
+                      count: searchResults.subdomainHits.length,
+                    },
+                  ].map((tab) => {
+                    const active = searchScopeTab === tab.id;
                     return (
-                      <div
-                        key={a.id}
-                        onClick={() => handleSelectAssessment(a.id)}
-                        onMouseEnter={() => setHighlightedIndex(idx)}
-                        className={`p-3 cursor-pointer transition-colors flex items-center justify-between gap-3 group ${
-                          isHighlighted
-                            ? 'bg-cyan-950/40 border-l-2 border-cyan-400'
-                            : 'hover:bg-slate-800/60'
+                      <button
+                        key={tab.id}
+                        type="button"
+                        onClick={() => {
+                          setSearchScopeTab(tab.id);
+                          setHighlightedIndex(-1);
+                        }}
+                        className={`inline-flex items-center gap-1.5 px-2.5 py-1 rounded-md text-xs font-medium transition-colors whitespace-nowrap shrink-0 cursor-pointer ${
+                          active
+                            ? 'bg-slate-800 text-white border border-slate-600'
+                            : 'text-slate-400 hover:text-slate-200 hover:bg-slate-900'
                         }`}
                       >
-                        <div className="min-w-0 flex-1">
-                          <div className="flex items-center gap-2 mb-1 flex-wrap">
-                            <span className="font-semibold text-xs text-white truncate max-w-[200px] sm:max-w-[260px] group-hover:text-cyan-300 transition-colors">
-                              {highlightMatch(a.name, currentQuery)}
-                            </span>
-                            {a.isDemo && (
-                              <span className="px-1.5 py-0.2 text-[9px] font-mono font-bold uppercase bg-amber-500/20 text-amber-300 border border-amber-500/30 rounded">
-                                DEMO LAB
+                        <span>{tab.label}</span>
+                        <span className="font-mono tabular-nums text-[10px] text-slate-400">
+                          {tab.count}
+                        </span>
+                      </button>
+                    );
+                  })}
+                </div>
+              )}
+
+              {/* Results List */}
+              <div className="max-h-96 overflow-y-auto divide-y divide-slate-800/60">
+                {!currentQuery.trim() ? (
+                  assessments.length > 0 ? (
+                    <div>
+                      <div className="px-3.5 py-1.5 bg-slate-950/40 text-[11px] font-mono text-slate-400">
+                        Recent Assessments ({Math.min(assessments.length, 5)} of {assessments.length})
+                      </div>
+                      {assessments.slice(0, 5).map((a) => (
+                        <div
+                          key={a.id}
+                          onClick={() => handleSelectAssessment(a.id)}
+                          className="p-3 cursor-pointer hover:bg-slate-800/60 transition-colors flex items-center justify-between gap-3 group"
+                        >
+                          <div className="min-w-0 flex-1">
+                            <div className="text-xs font-semibold text-white truncate group-hover:text-cyan-300">
+                              {a.name}
+                            </div>
+                            <div className="text-[11px] text-slate-400 flex items-center gap-1.5 mt-0.5 truncate">
+                              <span className="font-mono text-cyan-300">
+                                {a.scope?.rootDomain}
                               </span>
-                            )}
-                            {getMiniStatusBadge(a.status)}
-                          </div>
-
-                          <div className="flex items-center gap-3 text-[11px] text-slate-400 flex-wrap">
-                            {/* Domain match */}
-                            <div className="flex items-center gap-1 text-cyan-300 font-mono">
-                              <Globe className="w-3.5 h-3.5 text-cyan-400 shrink-0" />
-                              <span>{highlightMatch(a.scope?.rootDomain || '', currentQuery)}</span>
-                            </div>
-
-                            {/* Client match */}
-                            <div className="flex items-center gap-1 text-slate-300">
-                              <Building2 className="w-3 h-3 text-slate-500 shrink-0" />
-                              <span>Client: {highlightMatch(a.clientName || 'General', currentQuery)}</span>
+                              <span aria-hidden="true">·</span>
+                              <span>{a.clientName || 'General Assessment'}</span>
+                              <span aria-hidden="true">·</span>
+                              <span className="font-mono tabular-nums">
+                                {a.stats?.subdomainsCount || 0} subdomains
+                              </span>
                             </div>
                           </div>
-
-                          <div className="flex items-center gap-3 mt-1 text-[10px] text-slate-500 font-mono">
-                            <span>{a.stats?.assetsCount || 0} assets</span>
-                            <span>•</span>
-                            <span className={a.stats?.findingsCount ? 'text-amber-400 font-medium' : ''}>
-                              {a.stats?.findingsCount || 0} findings
-                            </span>
-                            <span>•</span>
-                            <span>{new Date(a.createdAt).toLocaleDateString()}</span>
-                          </div>
+                          <ArrowRight className="w-3.5 h-3.5 text-slate-500 group-hover:text-cyan-400 shrink-0" />
                         </div>
+                      ))}
+                    </div>
+                  ) : (
+                    <div className="p-6 text-center space-y-1.5">
+                      <Search className="w-5 h-5 text-slate-500 mx-auto" />
+                      <p className="text-xs text-slate-300 font-medium">
+                        No assessments in index yet
+                      </p>
+                      <p className="text-[11px] text-slate-500">
+                        Create an assessment or load the Demo Lab fixture to index clients and subdomains.
+                      </p>
+                    </div>
+                  )
+                ) : visibleAssessmentHits.length > 0 || visibleSubdomainHits.length > 0 ? (
+                  <>
+                    {/* Section 1: Assessments & Clients */}
+                    {visibleAssessmentHits.length > 0 && (
+                      <div>
+                        <div className="px-3.5 py-1.5 bg-slate-950/50 text-[11px] font-medium text-slate-400 flex items-center justify-between">
+                          <span>Assessments &amp; Clients</span>
+                          <span className="font-mono tabular-nums text-[10px]">
+                            {visibleAssessmentHits.length}
+                          </span>
+                        </div>
+                        <div className="divide-y divide-slate-800/60">
+                          {visibleAssessmentHits.map((hit, idx) => {
+                            const a = hit.assessment;
+                            const isHighlighted = idx === highlightedIndex;
+                            return (
+                              <div
+                                key={a.id}
+                                onClick={() => handleSelectAssessment(a.id)}
+                                onMouseEnter={() => setHighlightedIndex(idx)}
+                                className={`p-3 cursor-pointer transition-colors flex items-center justify-between gap-3 group ${
+                                  isHighlighted
+                                    ? 'bg-slate-800/80'
+                                    : 'hover:bg-slate-800/50'
+                                }`}
+                              >
+                                <div className="min-w-0 flex-1">
+                                  <div className="flex items-center gap-2 mb-1 flex-wrap">
+                                    <span className="font-semibold text-xs text-white truncate max-w-[260px] group-hover:text-cyan-300 transition-colors">
+                                      {highlightMatch(a.name, currentQuery)}
+                                    </span>
+                                    {a.isDemo && (
+                                      <span className="text-[10px] font-mono text-amber-300">
+                                        · Demo Lab
+                                      </span>
+                                    )}
+                                    {getMiniStatusBadge(a.status)}
+                                  </div>
 
-                        <div className="shrink-0 flex items-center gap-1 text-cyan-400 text-xs font-medium opacity-80 group-hover:opacity-100 group-hover:translate-x-0.5 transition-all">
-                          <span className="hidden sm:inline text-[11px]">Workspace</span>
-                          <ArrowRight className="w-3.5 h-3.5" />
+                                  <div className="flex items-center gap-2 text-[11px] text-slate-400 flex-wrap">
+                                    <span className="inline-flex items-center gap-1 text-cyan-300 font-mono">
+                                      <Globe className="w-3 h-3 text-cyan-400 shrink-0" />
+                                      {highlightMatch(a.scope?.rootDomain || '', currentQuery)}
+                                    </span>
+                                    <span aria-hidden="true">·</span>
+                                    <span className="inline-flex items-center gap-1 text-slate-300">
+                                      <Building2 className="w-3 h-3 text-slate-500 shrink-0" />
+                                      {highlightMatch(a.clientName || 'General Assessment', currentQuery)}
+                                    </span>
+                                  </div>
+
+                                  <div className="flex items-center gap-2 mt-1 text-[10px] text-slate-500 font-mono tabular-nums flex-wrap">
+                                    <span>{a.stats?.assetsCount || 0} assets</span>
+                                    <span aria-hidden="true">·</span>
+                                    <span className={a.stats?.findingsCount ? 'text-amber-400' : ''}>
+                                      {a.stats?.findingsCount || 0} findings
+                                    </span>
+                                    {hit.matchedSubdomainCount > 0 && (
+                                      <>
+                                        <span aria-hidden="true">·</span>
+                                        <span className="text-cyan-400">
+                                          {hit.matchedSubdomainCount} matching subdomain
+                                          {hit.matchedSubdomainCount === 1 ? '' : 's'}
+                                        </span>
+                                      </>
+                                    )}
+                                  </div>
+                                </div>
+
+                                <div className="shrink-0 flex items-center gap-1 text-cyan-400 text-xs font-medium opacity-80 group-hover:opacity-100 transition-opacity whitespace-nowrap">
+                                  <span className="hidden sm:inline text-[11px]">Workspace</span>
+                                  <ArrowRight className="w-3.5 h-3.5" />
+                                </div>
+                              </div>
+                            );
+                          })}
                         </div>
                       </div>
-                    );
-                  })
+                    )}
+
+                    {/* Section 2: Discovered Subdomains */}
+                    {visibleSubdomainHits.length > 0 && (
+                      <div>
+                        <div className="px-3.5 py-1.5 bg-slate-950/50 text-[11px] font-medium text-slate-400 flex items-center justify-between">
+                          <span>Discovered Subdomains</span>
+                          <span className="font-mono tabular-nums text-[10px]">
+                            {searchResults.subdomainHits.length > 25
+                              ? `Showing 25 of ${searchResults.subdomainHits.length}`
+                              : searchResults.subdomainHits.length}
+                          </span>
+                        </div>
+                        <div className="divide-y divide-slate-800/60">
+                          {visibleSubdomainHits.map((hit, subIdx) => {
+                            const entry = hit.entry;
+                            const flatIdx = visibleAssessmentHits.length + subIdx;
+                            const isHighlighted = flatIdx === highlightedIndex;
+                            return (
+                              <div
+                                key={entry.id}
+                                onClick={() => handleSelectAssessment(entry.assessmentId)}
+                                onMouseEnter={() => setHighlightedIndex(flatIdx)}
+                                className={`p-3 cursor-pointer transition-colors flex items-center justify-between gap-3 group ${
+                                  isHighlighted
+                                    ? 'bg-slate-800/80'
+                                    : 'hover:bg-slate-800/50'
+                                }`}
+                              >
+                                <div className="min-w-0 flex-1">
+                                  <div className="flex items-center gap-2 min-w-0">
+                                    <Server className="w-3.5 h-3.5 text-cyan-400 shrink-0" />
+                                    <span className="font-mono text-xs font-medium text-white truncate group-hover:text-cyan-300">
+                                      {highlightMatch(entry.subdomain, currentQuery)}
+                                    </span>
+                                    {entry.isExposedRisk && (
+                                      <span className="text-[10px] font-mono text-amber-400 shrink-0">
+                                        · Exposed
+                                      </span>
+                                    )}
+                                  </div>
+                                  <div className="flex items-center gap-2 mt-1 text-[11px] text-slate-400 flex-wrap">
+                                    <span className="truncate max-w-[200px] text-slate-300">
+                                      {highlightMatch(entry.assessmentName, currentQuery)}
+                                    </span>
+                                    <span aria-hidden="true">·</span>
+                                    <span className="truncate max-w-[160px]">
+                                      {highlightMatch(entry.clientName, currentQuery)}
+                                    </span>
+                                    <span aria-hidden="true">·</span>
+                                    <span className="font-mono text-slate-500">
+                                      {entry.discoverySource}
+                                    </span>
+                                    {entry.ipAddress && (
+                                      <>
+                                        <span aria-hidden="true">·</span>
+                                        <span className="font-mono tabular-nums text-cyan-300">
+                                          {entry.ipAddress}
+                                        </span>
+                                      </>
+                                    )}
+                                  </div>
+                                </div>
+
+                                <div className="shrink-0 flex items-center gap-1 text-cyan-400 text-xs font-medium opacity-80 group-hover:opacity-100 transition-opacity whitespace-nowrap">
+                                  <span className="hidden sm:inline text-[11px]">Inspect</span>
+                                  <ArrowRight className="w-3.5 h-3.5" />
+                                </div>
+                              </div>
+                            );
+                          })}
+                        </div>
+                      </div>
+                    )}
+                  </>
                 ) : (
-                  <div className="p-6 text-center space-y-2">
+                  <div className="p-6 text-center space-y-2.5">
                     <Search className="w-6 h-6 text-slate-500 mx-auto" />
                     <p className="text-xs text-slate-300 font-medium">
-                      No assessments matching "{currentQuery.trim()}"
+                      No assessments, clients, or subdomains matching "{currentQuery.trim()}"
                     </p>
-                    <p className="text-[11px] text-slate-500 max-w-xs mx-auto">
-                      Search checks client names (e.g. Ethical Hacking) or target root domains (e.g. srux.in).
+                    <p className="text-[11px] text-slate-500 max-w-sm mx-auto">
+                      Global search checks assessment names, client organizations, root domains, and all discovered subdomains.
                     </p>
+                    <button
+                      type="button"
+                      onClick={() => {
+                        handleSearchChange('');
+                        setSearchScopeTab('all');
+                        searchInputRef.current?.focus();
+                      }}
+                      className="px-3 py-1.5 rounded-lg bg-slate-800 hover:bg-slate-700 text-cyan-300 border border-slate-700 text-xs font-medium cursor-pointer"
+                    >
+                      Clear Search
+                    </button>
                   </div>
                 )}
               </div>
@@ -465,18 +736,21 @@ export const AppShell: React.FC<AppShellProps> = ({
               {/* Dropdown Footer Actions */}
               <div className="p-2 bg-slate-900/90 flex items-center justify-between text-[11px] text-slate-400 px-3">
                 <button
+                  type="button"
                   onClick={() => {
                     setActivePage('dashboard');
                     setIsSearchOpen(false);
                   }}
-                  className="text-cyan-400 hover:text-cyan-300 font-medium transition-colors cursor-pointer flex items-center gap-1"
+                  className="text-cyan-400 hover:text-cyan-300 font-medium transition-colors cursor-pointer flex items-center gap-1 whitespace-nowrap"
                 >
                   <span>Filter in Dashboard</span>
                   <ArrowRight className="w-3 h-3" />
                 </button>
-                <div className="hidden sm:flex items-center gap-2 text-[10px] text-slate-500 font-mono">
+                <div className="hidden sm:flex items-center gap-2 text-[10px] text-slate-500 font-mono whitespace-nowrap">
                   <span>↑↓ navigate</span>
-                  <span>↵ select</span>
+                  <span>·</span>
+                  <span>↵ open</span>
+                  <span>·</span>
                   <span>esc close</span>
                 </div>
               </div>

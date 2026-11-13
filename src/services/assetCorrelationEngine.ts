@@ -1,4 +1,4 @@
-import {
+import type {
   Assessment,
   Asset,
   AssetType,
@@ -12,7 +12,7 @@ import {
   CorrelationAnomaly,
   AIAnalysis,
   FindingSeverity,
-} from '../types';
+} from '../types/index.ts';
 
 /**
  * Normalizes raw asset values into a canonical, deterministic format

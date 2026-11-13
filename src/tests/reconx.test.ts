@@ -10,12 +10,33 @@ import {
   createAssessmentSnapshot,
   compareAssessmentSnapshots
 } from '../services/changeDetectionEngine';
+import { calculateAssessmentRiskScore } from '../services/riskScoringEngine';
+import {
+  filterAlertableFindings,
+  buildSlackAlertPayload,
+  isValidSlackWebhookUrl,
+} from '../services/slackAlertService';
+import {
+  classifyReservedOrRirFallback,
+  extractAssetIp,
+  isExternalPublicIp,
+  isPrivateOrNonRoutableIp,
+  mapCountryToGeoRegion,
+} from '../services/ipGeolocationService';
+import {
+  buildSubdomainSearchEntries,
+  clearGlobalSearchCache,
+  loadGlobalSubdomainIndex,
+  queryGlobalSearchIndex,
+} from '../services/globalSearchService';
 import {
   Assessment,
   Asset,
   DnsRecord,
   WebEndpoint,
-  NetworkService
+  NetworkService,
+  Finding,
+  WebhookNotificationConfig,
 } from '../types';
 
 process.env.RECONX_TEST_MODE = 'true';
@@ -404,11 +425,403 @@ async function runAllTests() {
     console.log(
       `✅ 14. Large asset collection performance passed (1,201 assets correlated in ${elapsedMs.toFixed(1)}ms)`
     );
+
+    // 15. Weighted Risk-Scoring Engine
+    const lowExposureRisk = calculateAssessmentRiskScore({
+      assessment: dummyAssessment,
+      assets: fullCorr.normalizedAssets,
+      services: sampleSvcs, // only 443 HTTPS
+      endpoints: sampleEps, // only HTTPS 200
+      findings: [],
+    });
+    const highExposureFindings: Finding[] = [
+      {
+        id: 'rf_1',
+        assessmentId: dummyAssessment.id,
+        ownerId: dummyAssessment.ownerId,
+        title: 'Critical Exposed Redis & Remote Code Surface',
+        description: 'Unauthenticated Redis listener exposed externally.',
+        severity: 'critical',
+        confidence: 'certain',
+        category: 'Database Security',
+        assetRef: 'db.example.com:6379',
+        evidence: 'Port 6379 open with banner',
+        sourceTool: 'Nmap',
+        remediation: 'Restrict access to private VPC',
+        verificationStatus: 'verified',
+        firstSeen: '2026-10-01T00:00:00.000Z',
+        lastSeen: '2026-10-01T00:00:00.000Z',
+      },
+      {
+        id: 'rf_2',
+        assessmentId: dummyAssessment.id,
+        ownerId: dummyAssessment.ownerId,
+        title: 'Deprecated TLS 1.0 Cipher Suite',
+        description: 'Weak cipher enabled.',
+        severity: 'high',
+        confidence: 'firm',
+        category: 'TLS',
+        assetRef: 'api.example.com',
+        evidence: 'TLS 1.0 handshake',
+        sourceTool: 'httpx',
+        remediation: 'Upgrade to TLS 1.3',
+        verificationStatus: 'potential_risk',
+        firstSeen: '2026-10-01T00:00:00.000Z',
+        lastSeen: '2026-10-01T00:00:00.000Z',
+      },
+    ];
+    const highExposureServices: NetworkService[] = [
+      ...sampleSvcs,
+      {
+        id: 's_redis',
+        assessmentId: dummyAssessment.id,
+        ownerId: dummyAssessment.ownerId,
+        host: 'db.example.com',
+        ip: '93.184.216.99',
+        port: 6379,
+        protocol: 'tcp',
+        state: 'open',
+        serviceName: 'redis',
+        version: 'Redis 6.2.1',
+        toolSource: 'Nmap',
+        timestamp: '2026-10-01T01:00:00.000Z',
+      },
+    ];
+    const highExposureRisk = calculateAssessmentRiskScore({
+      assessment: dummyAssessment,
+      assets: fullCorr.normalizedAssets,
+      services: highExposureServices,
+      endpoints: sampleEps,
+      findings: highExposureFindings,
+    });
+    assert.ok(
+      highExposureRisk.aggregateScore > lowExposureRisk.aggregateScore,
+      'Aggregate risk score must increase significantly with critical ports, exposed services, and findings'
+    );
+    assert.ok(
+      highExposureRisk.aggregateScore >= 65 && highExposureRisk.aggregateScore <= 100,
+      'Critical finding + Redis exposure must yield High/Critical risk score within [65, 100]'
+    );
+    assert.ok(
+      highExposureRisk.subScores.openPortsScore > lowExposureRisk.subScores.openPortsScore &&
+        highExposureRisk.subScores.exposedServicesScore >
+          lowExposureRisk.subScores.exposedServicesScore &&
+        highExposureRisk.subScores.vulnerabilitiesScore > 0,
+      'All three weighted risk pillars must reflect exposure increases'
+    );
+    console.log(
+      `✅ 15. Weighted risk-scoring engine passed (Low=${lowExposureRisk.aggregateScore}/100 vs Critical=${highExposureRisk.aggregateScore}/100)`
+    );
+
+    // 16. Automated Slack Webhook Alerting (Filtering, Validation, Payload & HTTP Dispatch)
+    const webhookConfig: WebhookNotificationConfig = {
+      enabled: true,
+      provider: 'slack',
+      webhookUrl: 'https://hooks.slack.com/services/example-org/example-channel/example-token',
+      channelName: '#secops-critical',
+      minSeverity: 'high',
+      notifyOnScanComplete: false,
+    };
+
+    const urlValidationValid = isValidSlackWebhookUrl(webhookConfig.webhookUrl);
+    const urlValidationInvalid = isValidSlackWebhookUrl('http://hooks.slack.com/services/insecure');
+    assert.equal(urlValidationValid.valid, true, 'Standard HTTPS Slack webhook URL must validate');
+    assert.equal(urlValidationInvalid.valid, false, 'Non-HTTPS webhook URL must be rejected');
+
+    const mixedFindings: Finding[] = [
+      ...highExposureFindings, // critical + high
+      {
+        id: 'rf_low',
+        assessmentId: dummyAssessment.id,
+        ownerId: dummyAssessment.ownerId,
+        title: 'Missing X-Content-Type-Options Header',
+        description: 'Informational hardening note.',
+        severity: 'low',
+        confidence: 'firm',
+        category: 'HTTP Headers',
+        assetRef: 'https://api.example.com',
+        evidence: 'Header absent',
+        sourceTool: 'httpx',
+        remediation: 'Add nosniff header',
+        verificationStatus: 'observed_fact',
+        firstSeen: '2026-10-01T00:00:00.000Z',
+        lastSeen: '2026-10-01T00:00:00.000Z',
+      },
+    ];
+
+    const alertable = filterAlertableFindings(mixedFindings, webhookConfig);
+    assert.equal(alertable.length, 2, 'High threshold must filter out low severity findings');
+    assert.equal(alertable[0].severity, 'critical', 'Critical findings must sort first in alerts');
+
+    let receivedWebhookBody: any = null;
+    const mockSlackServer = http.createServer((req, res) => {
+      let raw = '';
+      req.on('data', (chunk) => {
+        raw += chunk;
+      });
+      req.on('end', () => {
+        receivedWebhookBody = JSON.parse(raw);
+        res.statusCode = 200;
+        res.end('ok');
+      });
+    });
+    await new Promise<void>((resolve) => mockSlackServer.listen(0, '127.0.0.1', resolve));
+    const slackAddr = mockSlackServer.address() as { port: number };
+    const mockWebhookUrl = `http://127.0.0.1:${slackAddr.port}/services/test/mock`;
+
+    try {
+      const payload = buildSlackAlertPayload({
+        assessment: dummyAssessment,
+        findings: alertable,
+        webhookConfig,
+        riskScore: highExposureRisk.aggregateScore,
+        riskTier: highExposureRisk.severityTier,
+      });
+
+      const notifyRes = await fetch(`${baseUrl}/api/notifications/slack`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          webhookUrl: mockWebhookUrl,
+          channelName: webhookConfig.channelName,
+          assessmentName: dummyAssessment.name,
+          rootDomain: dummyAssessment.scope.rootDomain,
+          alertedCount: alertable.length,
+          payload,
+        }),
+      });
+      assert.equal(notifyRes.status, 200, 'Slack proxy endpoint must deliver webhook payload');
+      const notifyJson = await notifyRes.json();
+      assert.equal(notifyJson.ok, true);
+      assert.equal(notifyJson.alertedCount, 2);
+      assert.ok(receivedWebhookBody?.blocks?.length >= 4, 'Slack Block Kit payload must be received');
+      assert.ok(
+        receivedWebhookBody.text.includes('Example.COM.'),
+        'Slack notification text must include target domain'
+      );
+
+      // Verify bad payload returns HTTP 400
+      const badNotifyRes = await fetch(`${baseUrl}/api/notifications/slack`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ webhookUrl: 'not-a-url' }),
+      });
+      assert.equal(badNotifyRes.status, 400, 'Malformed webhook URL must return HTTP 400');
+    } finally {
+      mockSlackServer.close();
+    }
+
+    console.log('✅ 16. Automated Slack webhook alerting & /api/notifications/slack dispatch passed');
+
+    // 17. External IP Geolocation Resolution, Asset IP Extraction & Geographic Region Filtering
+    assert.equal(isPrivateOrNonRoutableIp('10.14.0.5'), true, 'RFC1918 10.x must be marked private/internal');
+    assert.equal(isExternalPublicIp('10.14.0.5'), false, 'RFC1918 IP must not be flagged external');
+    assert.equal(isExternalPublicIp('198.51.100.42'), true, 'Public IPv4 must be flagged external');
+
+    assert.equal(mapCountryToGeoRegion('US', 'North America').id, 'north-america');
+    assert.equal(mapCountryToGeoRegion('DE', 'Europe').id, 'europe');
+    assert.equal(mapCountryToGeoRegion('SG', 'Asia').id, 'asia-pacific');
+    assert.equal(mapCountryToGeoRegion('BR', 'South America').id, 'latin-america');
+    assert.equal(mapCountryToGeoRegion('ZA', 'Africa').id, 'middle-east-africa');
+
+    const dnsCorrelatedAsset: Asset = {
+      id: 'geo_ast_1',
+      assessmentId: dummyAssessment.id,
+      ownerId: dummyAssessment.ownerId,
+      assetType: 'subdomain',
+      assetValue: 'edge.example.com',
+      canonicalName: 'edge.example.com',
+      normalizedValue: 'edge.example.com',
+      discoverySource: 'dnsx',
+      confidenceScore: 95,
+      status: 'active',
+      firstSeen: '2026-10-01T00:00:00.000Z',
+      lastSeen: '2026-10-01T00:00:00.000Z',
+    };
+    const sampleDnsRecords: DnsRecord[] = [
+      {
+        id: 'dns_geo_1',
+        assessmentId: dummyAssessment.id,
+        ownerId: dummyAssessment.ownerId,
+        hostname: 'edge.example.com',
+        recordType: 'A',
+        value: '198.51.100.42',
+        ttl: 300,
+        source: 'dnsx',
+        timestamp: '2026-10-01T00:00:00.000Z',
+      },
+    ];
+    assert.equal(
+      extractAssetIp(dnsCorrelatedAsset, sampleDnsRecords, [], []),
+      '198.51.100.42',
+      'extractAssetIp must resolve IPv4 from correlated DNS A record'
+    );
+
+    assert.equal(classifyReservedOrRirFallback('198.51.100.42').countryCode, 'DE');
+    assert.equal(classifyReservedOrRirFallback('198.51.100.42').geoRegionId, 'europe');
+    assert.equal(classifyReservedOrRirFallback('203.0.113.99').countryCode, 'SG');
+    assert.equal(classifyReservedOrRirFallback('203.0.113.99').geoRegionId, 'asia-pacific');
+
+    const geoBatchRes = await fetch(`${baseUrl}/api/geo/ip-lookup`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ ips: ['10.14.0.5', '8.8.8.8', '198.51.100.42'] }),
+    });
+    assert.equal(geoBatchRes.status, 200, '/api/geo/ip-lookup must return HTTP 200');
+    const geoBatchJson = await geoBatchRes.json();
+    assert.equal(geoBatchJson.ok, true);
+    assert.equal(geoBatchJson.results['10.14.0.5'].isExternal, false);
+    assert.equal(geoBatchJson.results['10.14.0.5'].geoRegionId, 'internal');
+    assert.equal(geoBatchJson.results['8.8.8.8'].isExternal, true);
+    assert.equal(geoBatchJson.results['8.8.8.8'].countryCode, 'US');
+    assert.equal(geoBatchJson.results['8.8.8.8'].geoRegionId, 'north-america');
+    assert.equal(geoBatchJson.results['198.51.100.42'].isExternal, true);
+    assert.ok(geoBatchJson.results['198.51.100.42'].country.length > 0);
+    assert.notEqual(geoBatchJson.results['198.51.100.42'].geoRegionId, 'internal');
+
+    const geoSingleRes = await fetch(`${baseUrl}/api/geo/ip/8.8.8.8`);
+    assert.equal(geoSingleRes.status, 200, 'GET /api/geo/ip/:ip must return HTTP 200');
+    const geoSingleJson = await geoSingleRes.json();
+    assert.equal(geoSingleJson.geo.countryCode, 'US');
+
+    const badGeoRes = await fetch(`${baseUrl}/api/geo/ip-lookup`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ ips: ['not-an-ip'] }),
+    });
+    assert.equal(badGeoRes.status, 400, 'Invalid IPs payload must return HTTP 400');
+
+    console.log('✅ 17. IP geolocation resolution, asset IP extraction & geographic lookup API passed');
+
+    // 18. AppShell Global Search across Assessment Names, Clients, and Discovered Subdomains
+    clearGlobalSearchCache();
+    const searchAsmA: Assessment = {
+      ...dummyAssessment,
+      id: 'search_asm_a',
+      name: 'Payment Gateway Audit',
+      clientName: 'Acme Financial Corp',
+      scope: {
+        ...dummyAssessment.scope,
+        rootDomain: 'acme-pay.com',
+        approvedHostnames: ['api.acme-pay.com'],
+      },
+      stats: { ...dummyAssessment.stats, subdomainsCount: 3, assetsCount: 4 },
+      updatedAt: '2026-10-05T10:00:00.000Z',
+    };
+    const searchAsmB: Assessment = {
+      ...dummyAssessment,
+      id: 'search_asm_b',
+      name: 'Perimeter Edge Discovery',
+      clientName: 'Globex Logistics',
+      scope: {
+        ...dummyAssessment.scope,
+        rootDomain: 'globex-logistics.io',
+        approvedHostnames: ['portal.globex-logistics.io'],
+      },
+      stats: { ...dummyAssessment.stats, subdomainsCount: 2, assetsCount: 2 },
+      updatedAt: '2026-10-06T10:00:00.000Z',
+    };
+
+    const mockDiscoveredAssets: Record<string, Asset[]> = {
+      search_asm_a: [
+        {
+          id: 'sub_1',
+          assessmentId: 'search_asm_a',
+          ownerId: 'analyst_01',
+          assetType: 'subdomain',
+          assetValue: 'internal-vault.acme-pay.com',
+          canonicalName: 'internal-vault.acme-pay.com',
+          normalizedValue: 'internal-vault.acme-pay.com',
+          discoverySource: 'Subfinder',
+          confidenceScore: 96,
+          status: 'active',
+          firstSeen: '2026-10-05T10:00:00.000Z',
+          lastSeen: '2026-10-05T10:00:00.000Z',
+        },
+        {
+          id: 'sub_2',
+          assessmentId: 'search_asm_a',
+          ownerId: 'analyst_01',
+          assetType: 'subdomain',
+          assetValue: 'api.acme-pay.com',
+          canonicalName: 'api.acme-pay.com',
+          normalizedValue: 'api.acme-pay.com',
+          discoverySource: 'dnsx',
+          confidenceScore: 99,
+          status: 'active',
+          firstSeen: '2026-10-05T10:00:00.000Z',
+          lastSeen: '2026-10-05T10:00:00.000Z',
+        },
+      ],
+      search_asm_b: [
+        {
+          id: 'sub_3',
+          assessmentId: 'search_asm_b',
+          ownerId: 'analyst_01',
+          assetType: 'subdomain',
+          assetValue: 'tracking-vault.globex-logistics.io',
+          canonicalName: 'tracking-vault.globex-logistics.io',
+          normalizedValue: 'tracking-vault.globex-logistics.io',
+          discoverySource: 'Subfinder',
+          confidenceScore: 92,
+          status: 'active',
+          firstSeen: '2026-10-06T10:00:00.000Z',
+          lastSeen: '2026-10-06T10:00:00.000Z',
+        },
+      ],
+    };
+
+    // Deduplication test between assets and scope hostnames
+    const builtA = buildSubdomainSearchEntries(searchAsmA, mockDiscoveredAssets.search_asm_a);
+    assert.equal(
+      builtA.filter((e) => e.subdomain === 'api.acme-pay.com').length,
+      1,
+      'Subdomain search entries must deduplicate scope hostnames already in discovered assets'
+    );
+
+    let fetchCount = 0;
+    const mockFetcher = async (id: string) => {
+      fetchCount += 1;
+      return mockDiscoveredAssets[id] || [];
+    };
+
+    const firstIndex = await loadGlobalSubdomainIndex([searchAsmA, searchAsmB], mockFetcher);
+    assert.equal(fetchCount, 2, 'Initial global index build must fetch assets once per assessment');
+    await loadGlobalSubdomainIndex([searchAsmA, searchAsmB], mockFetcher);
+    assert.equal(fetchCount, 2, 'Cached global search index must avoid duplicate Firestore reads');
+
+    // Query 1: Match Assessment Name
+    const byName = queryGlobalSearchIndex('Payment Gateway', [searchAsmA, searchAsmB], firstIndex);
+    assert.equal(byName.assessmentHits.length, 1);
+    assert.equal(byName.assessmentHits[0].assessment.id, 'search_asm_a');
+    assert.ok(byName.assessmentHits[0].matchedFields.includes('name'));
+
+    // Query 2: Match Client Name
+    const byClient = queryGlobalSearchIndex('Globex Logistics', [searchAsmA, searchAsmB], firstIndex);
+    assert.equal(byClient.assessmentHits.length, 1);
+    assert.equal(byClient.assessmentHits[0].assessment.id, 'search_asm_b');
+    assert.ok(byClient.assessmentHits[0].matchedFields.includes('client'));
+
+    // Query 3: Match Discovered Subdomain across multiple assessments
+    const bySubdomain = queryGlobalSearchIndex('vault', [searchAsmA, searchAsmB], firstIndex);
+    assert.equal(bySubdomain.subdomainHits.length, 2, 'Query must match discovered subdomains across all assessments');
+    assert.equal(bySubdomain.assessmentHits.length, 2, 'Parent assessments containing matching subdomains must surface');
+
+    const byExactSubdomain = queryGlobalSearchIndex('internal-vault', [searchAsmA, searchAsmB], firstIndex);
+    assert.equal(byExactSubdomain.subdomainHits.length, 1);
+    assert.equal(byExactSubdomain.subdomainHits[0].entry.subdomain, 'internal-vault.acme-pay.com');
+    assert.equal(byExactSubdomain.subdomainHits[0].entry.assessmentId, 'search_asm_a');
+
+    // Query 4: Non-matching query
+    const noMatch = queryGlobalSearchIndex('nonexistent-xyz-target', [searchAsmA, searchAsmB], firstIndex);
+    assert.equal(noMatch.totalHits, 0);
+
+    console.log('✅ 18. Global search across assessment names, clients, and discovered subdomains passed');
   } finally {
     server.close();
   }
 
-  console.log('\n🎉 ALL 14 AUTOMATED RECONX TEST SUITES PASSED SUCCESSFULLY!');
+  console.log('\n🎉 ALL 18 AUTOMATED RECONX TEST SUITES PASSED SUCCESSFULLY!');
 }
 
 runAllTests().catch((err) => {

@@ -2,8 +2,11 @@ import express from 'express';
 import dns from 'dns/promises';
 import net from 'net';
 import tls from 'tls';
+import path from 'path';
+import fs from 'fs';
+import { fileURLToPath } from 'url';
 import { GoogleGenAI, Type } from '@google/genai';
-import {
+import type {
   Assessment,
   Asset,
   DnsRecord,
@@ -16,15 +19,22 @@ import {
   AssessmentSnapshot,
   AssetChange,
   AIAnalysis,
-} from './src/types';
+  IpGeoLocation,
+} from './src/types/index.ts';
 import {
   runAssetCorrelationEngine,
   generateDeterministicAIAnalysis,
-} from './src/services/assetCorrelationEngine';
+} from './src/services/assetCorrelationEngine.ts';
 import {
   createAssessmentSnapshot,
   compareAssessmentSnapshots,
-} from './src/services/changeDetectionEngine';
+} from './src/services/changeDetectionEngine.ts';
+import {
+  isValidIpv4,
+  isPrivateOrNonRoutableIp,
+  mapCountryToGeoRegion,
+  classifyReservedOrRirFallback,
+} from './src/services/ipGeolocationService.ts';
 
 export const app = express();
 app.use(express.json({ limit: '10mb' }));
@@ -1157,11 +1167,347 @@ app.post('/api/recon/execute', async (req, res) => {
 });
 
 // ============================================================================
+// AUTOMATED SLACK WEBHOOK NOTIFICATION ENDPOINT (/api/notifications/slack)
+// ============================================================================
+
+function isBlockedWebhookHost(hostname: string): boolean {
+  const lower = hostname.toLowerCase();
+  if (
+    lower === 'localhost' ||
+    lower === '0.0.0.0' ||
+    lower === '::1' ||
+    lower === '[::1]' ||
+    lower.endsWith('.local') ||
+    lower.endsWith('.internal')
+  ) {
+    return true;
+  }
+  return isPrivateOrReservedIP(lower);
+}
+
+app.post('/api/notifications/slack', async (req, res) => {
+  try {
+    const {
+      webhookUrl,
+      channelName,
+      assessmentName,
+      rootDomain,
+      alertedCount = 0,
+      isTest = false,
+      payload,
+    } = req.body || {};
+
+    if (!webhookUrl || typeof webhookUrl !== 'string') {
+      return res.status(400).json({
+        ok: false,
+        error: 'A valid Slack Incoming Webhook URL is required.',
+      });
+    }
+
+    let parsedUrl: URL;
+    try {
+      parsedUrl = new URL(webhookUrl.trim());
+    } catch {
+      return res.status(400).json({
+        ok: false,
+        error: 'Malformed webhook URL.',
+      });
+    }
+
+    const isTestMode = process.env.RECONX_TEST_MODE === 'true';
+    if (!isTestMode) {
+      if (parsedUrl.protocol !== 'https:') {
+        return res.status(400).json({
+          ok: false,
+          error: 'Slack webhook URLs must use HTTPS.',
+        });
+      }
+      if (isBlockedWebhookHost(parsedUrl.hostname)) {
+        return res.status(400).json({
+          ok: false,
+          error: 'Private, loopback, and internal network webhook targets are blocked.',
+        });
+      }
+    } else if (parsedUrl.protocol !== 'https:' && parsedUrl.protocol !== 'http:') {
+      return res.status(400).json({
+        ok: false,
+        error: 'Unsupported webhook protocol.',
+      });
+    }
+
+    const slackBody =
+      payload && typeof payload === 'object' && (payload.text || Array.isArray(payload.blocks))
+        ? payload
+        : {
+            text: `[ReconX] ${isTest ? 'Test Alert' : 'High-Severity Security Alert'} for ${
+              rootDomain || assessmentName || 'Assessment'
+            }${channelName ? ` (${channelName})` : ''}`,
+          };
+
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), 8000);
+
+    try {
+      const upstream = await fetch(parsedUrl.toString(), {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(slackBody),
+        signal: controller.signal,
+      });
+
+      const responseText = await upstream.text().catch(() => '');
+      if (!upstream.ok) {
+        return res.status(502).json({
+          ok: false,
+          statusCode: upstream.status,
+          error: `Slack webhook rejected request (HTTP ${upstream.status}${
+            responseText ? `: ${responseText.slice(0, 120)}` : ''
+          })`,
+        });
+      }
+
+      return res.json({
+        ok: true,
+        statusCode: upstream.status,
+        alertedCount,
+        isTest: Boolean(isTest),
+        channelName: channelName || '#security-alerts',
+        deliveredAt: new Date().toISOString(),
+        message: isTest
+          ? `Test webhook notification delivered to ${channelName || 'Slack'}.`
+          : `Dispatched ${alertedCount} high-severity alert(s) to ${channelName || 'Slack'}.`,
+      });
+    } catch (fetchErr: any) {
+      return res.status(502).json({
+        ok: false,
+        statusCode: 502,
+        error:
+          fetchErr?.name === 'AbortError'
+            ? 'Slack webhook request timed out after 8s.'
+            : fetchErr?.message || 'Failed to reach Slack webhook endpoint.',
+      });
+    } finally {
+      clearTimeout(timer);
+    }
+  } catch (err: any) {
+    return res.status(500).json({
+      ok: false,
+      error: err?.message || 'Internal webhook notification error.',
+    });
+  }
+});
+
+// ============================================================================
+// IP GEOLOCATION SERVICE ENDPOINTS (/api/geo/ip-lookup & /api/geo/ip/:ip)
+// ============================================================================
+
+const GEO_CACHE_TTL_MS = 12 * 60 * 60 * 1000;
+const serverGeoCache = new Map<string, { expiresAt: number; data: IpGeoLocation }>();
+
+async function resolveBatchIpGeolocations(ips: string[]): Promise<Record<string, IpGeoLocation>> {
+  const uniqueIps = Array.from(
+    new Set(ips.map((ip) => (ip || '').trim()).filter((ip) => isValidIpv4(ip)))
+  ).slice(0, 100);
+
+  const results: Record<string, IpGeoLocation> = {};
+  const externalToFetch: string[] = [];
+  const now = Date.now();
+
+  for (const ip of uniqueIps) {
+    const cached = serverGeoCache.get(ip);
+    if (cached && cached.expiresAt > now) {
+      results[ip] = cached.data;
+      continue;
+    }
+
+    if (isPrivateOrNonRoutableIp(ip)) {
+      const localGeo = classifyReservedOrRirFallback(ip);
+      serverGeoCache.set(ip, { expiresAt: now + GEO_CACHE_TTL_MS, data: localGeo });
+      results[ip] = localGeo;
+      continue;
+    }
+
+    externalToFetch.push(ip);
+  }
+
+  if (externalToFetch.length > 0) {
+    // Primary batch lookup via ip-api.com (no API key required, up to 100 IPs per POST)
+    try {
+      const controller = new AbortController();
+      const timer = setTimeout(() => controller.abort(), 4500);
+      try {
+        const resp = await fetch(
+          'http://ip-api.com/batch?fields=status,message,country,countryCode,regionName,city,continent,isp,org,as,lat,lon,query',
+          {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify(externalToFetch),
+            signal: controller.signal,
+          }
+        );
+
+        if (resp.ok) {
+          const batchData = (await resp.json()) as Array<Record<string, any>>;
+          if (Array.isArray(batchData)) {
+            for (const entry of batchData) {
+              const queryIp = String(entry?.query || '').trim();
+              if (!queryIp || entry?.status !== 'success') continue;
+              const mappedRegion = mapCountryToGeoRegion(entry.countryCode, entry.continent);
+              const geoRecord: IpGeoLocation = {
+                ip: queryIp,
+                isExternal: true,
+                country: entry.country || 'Unknown',
+                countryCode: entry.countryCode || 'UN',
+                regionName: entry.regionName || undefined,
+                city: entry.city || undefined,
+                continent: entry.continent || 'Unknown',
+                geoRegionId: mappedRegion.id,
+                geoRegionLabel: mappedRegion.label,
+                isp: entry.isp || entry.org || undefined,
+                asn: entry.as || undefined,
+                lat: typeof entry.lat === 'number' ? entry.lat : undefined,
+                lon: typeof entry.lon === 'number' ? entry.lon : undefined,
+                source: 'ip-api',
+                resolvedAt: new Date().toISOString(),
+              };
+              serverGeoCache.set(queryIp, { expiresAt: now + GEO_CACHE_TTL_MS, data: geoRecord });
+              results[queryIp] = geoRecord;
+            }
+          }
+        }
+      } finally {
+        clearTimeout(timer);
+      }
+    } catch {
+      // Proceed to secondary provider & RIR fallback below
+    }
+
+    // Secondary single-IP fallback via ipwho.is for any still-unresolved external IPs (cap 8 concurrent)
+    const remaining = externalToFetch.filter((ip) => !results[ip]).slice(0, 8);
+    if (remaining.length > 0) {
+      await Promise.all(
+        remaining.map(async (ip) => {
+          const controller = new AbortController();
+          const timer = setTimeout(() => controller.abort(), 3500);
+          try {
+            const resp = await fetch(`https://ipwho.is/${encodeURIComponent(ip)}`, {
+              signal: controller.signal,
+              headers: { 'User-Agent': 'ReconX-ASM-GeoIP/1.0' },
+            });
+            if (resp.ok) {
+              const data = (await resp.json()) as Record<string, any>;
+              if (data?.success && data?.country) {
+                const mappedRegion = mapCountryToGeoRegion(data.country_code, data.continent);
+                const geoRecord: IpGeoLocation = {
+                  ip,
+                  isExternal: true,
+                  country: data.country,
+                  countryCode: data.country_code || 'UN',
+                  regionName: data.region || undefined,
+                  city: data.city || undefined,
+                  continent: data.continent || 'Unknown',
+                  geoRegionId: mappedRegion.id,
+                  geoRegionLabel: mappedRegion.label,
+                  isp: data.connection?.isp || data.connection?.org || undefined,
+                  asn: data.connection?.asn ? `AS${data.connection.asn}` : undefined,
+                  lat: typeof data.latitude === 'number' ? data.latitude : undefined,
+                  lon: typeof data.longitude === 'number' ? data.longitude : undefined,
+                  source: 'ipwho.is',
+                  resolvedAt: new Date().toISOString(),
+                };
+                serverGeoCache.set(ip, { expiresAt: now + GEO_CACHE_TTL_MS, data: geoRecord });
+                results[ip] = geoRecord;
+                return;
+              }
+            }
+          } catch {
+            // Fall through to RIR fallback
+          } finally {
+            clearTimeout(timer);
+          }
+        })
+      );
+    }
+
+    // Final deterministic fallback for reserved documentation ranges (e.g. 203.0.113.x) or offline mode
+    for (const ip of externalToFetch) {
+      if (!results[ip]) {
+        const fallback = classifyReservedOrRirFallback(ip);
+        serverGeoCache.set(ip, { expiresAt: now + GEO_CACHE_TTL_MS, data: fallback });
+        results[ip] = fallback;
+      }
+    }
+  }
+
+  return results;
+}
+
+app.post('/api/geo/ip-lookup', async (req, res) => {
+  try {
+    const ips = req.body?.ips;
+    if (!Array.isArray(ips)) {
+      return res.status(400).json({
+        ok: false,
+        error: 'Request body must include an ips string array.',
+      });
+    }
+
+    const validIps = ips.filter((ip) => typeof ip === 'string' && isValidIpv4(ip.trim()));
+    if (ips.length > 0 && validIps.length === 0) {
+      return res.status(400).json({
+        ok: false,
+        error: 'No valid IPv4 addresses provided in request.',
+      });
+    }
+
+    const results = await resolveBatchIpGeolocations(validIps);
+    return res.json({
+      ok: true,
+      count: Object.keys(results).length,
+      results,
+    });
+  } catch (err: any) {
+    return res.status(500).json({
+      ok: false,
+      error: err?.message || 'IP geolocation lookup error',
+    });
+  }
+});
+
+app.get('/api/geo/ip/:ip', async (req, res) => {
+  const ip = (req.params.ip || '').trim();
+  if (!isValidIpv4(ip)) {
+    return res.status(400).json({
+      ok: false,
+      error: `Invalid IPv4 address '${ip}'.`,
+    });
+  }
+  const results = await resolveBatchIpGeolocations([ip]);
+  return res.json({
+    ok: true,
+    geo: results[ip],
+  });
+});
+
+// ============================================================================
 // VITE DEV SERVER OR PRODUCTION STATIC SERVING
 // ============================================================================
 
+app.get('/api/health', (_req, res) => {
+  res.json({ ok: true, status: 'healthy' });
+});
+
+const __filename = fileURLToPath(import.meta.url);
+const __dirname = path.dirname(__filename);
+
 async function startServer() {
-  const isProd = process.env.NODE_ENV === 'production';
+  const distDir = path.resolve(__dirname, 'dist');
+  const runningUnderTsx = process.execArgv.some((arg) => arg.includes('tsx'));
+  const isProd =
+    process.env.NODE_ENV === 'production' ||
+    (process.env.NODE_ENV !== 'development' &&
+      !runningUnderTsx &&
+      fs.existsSync(path.join(distDir, 'index.html')));
   const port = isProd && process.env.PORT ? Number(process.env.PORT) : DEFAULT_APP_PORT;
 
   if (!isProd) {
@@ -1172,7 +1518,11 @@ async function startServer() {
     });
     app.use(vite.middlewares);
   } else {
-    app.use(express.static('dist'));
+    app.use(express.static(distDir));
+    app.get('*', (req, res, next) => {
+      if (req.path.startsWith('/api/')) return next();
+      return res.sendFile(path.join(distDir, 'index.html'));
+    });
   }
 
   app.listen(port, '0.0.0.0', () => {

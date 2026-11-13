@@ -1,5 +1,14 @@
-import React, { useState, useRef, useEffect } from 'react';
-import { Assessment, Finding } from '../types';
+import React, { useState, useRef, useEffect, useMemo } from 'react';
+import {
+  Assessment,
+  Asset,
+  DnsRecord,
+  Finding,
+  GeoRegionId,
+  IpGeoLocation,
+  NetworkService,
+  WebEndpoint,
+} from '../types';
 import {
   ShieldAlert,
   Server,
@@ -37,6 +46,21 @@ import {
   exportSingleAssessmentCsv,
   exportSingleAssessmentJson,
 } from '../services/exportService';
+import {
+  AssetDistributionHeatmap,
+  ClusteredAssetItem,
+  resolveAssetGeoRegion,
+  resolveAssetSeverity,
+} from '../components/dashboard/AssetDistributionHeatmap';
+import {
+  DashboardAssetList,
+  DashboardAssetRow,
+} from '../components/dashboard/DashboardAssetList';
+import {
+  extractAssetIp,
+  lookupIpGeolocations,
+} from '../services/ipGeolocationService';
+import { seedSubdomainIndexForAssessment } from '../services/globalSearchService';
 
 interface Props {
   assessments: Assessment[];
@@ -78,6 +102,24 @@ export const Dashboard: React.FC<Props> = ({
   const [isDeleting, setIsDeleting] = useState(false);
   const [deleteError, setDeleteError] = useState<string | null>(null);
   const [exportingPdfId, setExportingPdfId] = useState<string | null>(null);
+
+  // Shared Dashboard Intelligence & IP Geolocation State
+  type CachedAssessmentIntel = {
+    updatedAt: string;
+    assets: Asset[];
+    dnsRecords: DnsRecord[];
+    endpoints: WebEndpoint[];
+    services: NetworkService[];
+    findings: Finding[];
+  };
+  const intelCacheRef = useRef<Map<string, CachedAssessmentIntel>>(new Map());
+  const [assessmentIntelMap, setAssessmentIntelMap] = useState<
+    Record<string, CachedAssessmentIntel>
+  >({});
+  const [ipGeoMap, setIpGeoMap] = useState<Record<string, IpGeoLocation>>({});
+  const [loadingDashboardIntel, setLoadingDashboardIntel] = useState(false);
+  const [resolvingGeo, setResolvingGeo] = useState(false);
+  const [selectedGeoRegion, setSelectedGeoRegion] = useState<GeoRegionId | 'all'>('all');
 
   // Close dropdowns on outside click, scroll, or viewport resize
   useEffect(() => {
@@ -144,7 +186,7 @@ export const Dashboard: React.FC<Props> = ({
           return false;
         }
       }
-      // 2. Search Query Filter
+      // 2. Search Query Filter (matches name, client, rootDomain, scope hostnames, and discovered subdomains)
       if (!searchQuery?.trim()) return true;
       const q = searchQuery.trim().toLowerCase();
       const clientMatch = a.clientName?.toLowerCase().includes(q);
@@ -153,9 +195,181 @@ export const Dashboard: React.FC<Props> = ({
       const hostnamesMatch = a.scope?.approvedHostnames?.some((h) =>
         h.toLowerCase().includes(q)
       );
-      return clientMatch || domainMatch || nameMatch || hostnamesMatch;
+      const discoveredSubdomainMatch = assessmentIntelMap[a.id]?.assets?.some(
+        (ast) =>
+          (ast.assetType === 'subdomain' || ast.assetType === 'root_domain') &&
+          (ast.canonicalName?.toLowerCase().includes(q) ||
+            ast.assetValue?.toLowerCase().includes(q))
+      );
+      return Boolean(
+        clientMatch || domainMatch || nameMatch || hostnamesMatch || discoveredSubdomainMatch
+      );
     });
-  }, [assessments, searchQuery, statusFilter]);
+  }, [assessments, searchQuery, statusFilter, assessmentIntelMap]);
+
+  // Load assessment intelligence once and resolve external IP geolocations in batch
+  useEffect(() => {
+    let cancelled = false;
+
+    async function loadIntelAndGeo() {
+      if (assessments.length === 0) {
+        setAssessmentIntelMap({});
+        setLoadingDashboardIntel(false);
+        setResolvingGeo(false);
+        return;
+      }
+
+      setLoadingDashboardIntel(true);
+      const nextMap: Record<string, CachedAssessmentIntel> = {};
+      const extractedIps = new Set<string>();
+
+      for (const assessment of assessments) {
+        let entry = intelCacheRef.current.get(assessment.id);
+        if (!entry || entry.updatedAt !== assessment.updatedAt) {
+          try {
+            const loaded = await firestoreService.loadOrComputeAssessmentIntelligence(assessment);
+            entry = {
+              updatedAt: assessment.updatedAt,
+              assets: loaded.assets,
+              dnsRecords: loaded.dnsRecords,
+              endpoints: loaded.endpoints,
+              services: loaded.services,
+              findings: loaded.findings,
+            };
+            intelCacheRef.current.set(assessment.id, entry);
+            seedSubdomainIndexForAssessment(assessment, entry.assets);
+          } catch (err) {
+            console.warn(`Dashboard intelligence load skipped for ${assessment.id}:`, err);
+            continue;
+          }
+        } else {
+          seedSubdomainIndexForAssessment(assessment, entry.assets);
+        }
+
+        nextMap[assessment.id] = entry;
+        for (const asset of entry.assets) {
+          const ip = extractAssetIp(asset, entry.dnsRecords, entry.endpoints, entry.services);
+          if (ip) extractedIps.add(ip);
+        }
+      }
+
+      if (cancelled) return;
+      setAssessmentIntelMap(nextMap);
+      setLoadingDashboardIntel(false);
+
+      const uniqueIps = Array.from(extractedIps);
+      if (uniqueIps.length > 0) {
+        setResolvingGeo(true);
+        try {
+          const resolved = await lookupIpGeolocations(uniqueIps);
+          if (!cancelled) {
+            setIpGeoMap((prev) => ({ ...prev, ...resolved }));
+          }
+        } finally {
+          if (!cancelled) setResolvingGeo(false);
+        }
+      } else {
+        setResolvingGeo(false);
+      }
+    }
+
+    loadIntelAndGeo();
+    return () => {
+      cancelled = true;
+    };
+  }, [assessments]);
+
+  // Build clustered asset items for Heatmap & geolocated asset rows for DashboardAssetList
+  const { clusteredAssetsForHeatmap, dashboardAssetRows } = useMemo(() => {
+    const ipToHeatmapRegion = new Map<string, string>();
+    const clustered: ClusteredAssetItem[] = [];
+    const assetRows: DashboardAssetRow[] = [];
+
+    for (const assessment of filteredAssessments) {
+      const intel = assessmentIntelMap[assessment.id];
+      if (!intel) continue;
+
+      // Pass 1: seed heatmap IP->region map first
+      for (const asset of intel.assets) {
+        const ip = extractAssetIp(asset, intel.dnsRecords, intel.endpoints, intel.services);
+        if (ip || asset.assetType === 'ip_address' || asset.ipAddress) {
+          const geo = ip ? ipGeoMap[ip] || null : null;
+          resolveAssetGeoRegion(asset, assessment, ipToHeatmapRegion, geo);
+        }
+      }
+
+      // Pass 2: build unified items for both Heatmap and DashboardAssetList
+      for (const asset of intel.assets) {
+        const resolvedIp = extractAssetIp(asset, intel.dnsRecords, intel.endpoints, intel.services);
+        const geo = resolvedIp ? ipGeoMap[resolvedIp] || null : null;
+        const heatmapRegion = resolveAssetGeoRegion(asset, assessment, ipToHeatmapRegion, geo);
+        const { severity, reason } = resolveAssetSeverity(asset, intel.findings);
+
+        clustered.push({
+          id: `${assessment.id}_${asset.id}`,
+          canonicalName: asset.canonicalName,
+          assetType: asset.assetType,
+          ipAddress: resolvedIp || asset.ipAddress,
+          openPorts: asset.openPorts || [],
+          regionId: heatmapRegion.id,
+          regionLabel: heatmapRegion.label,
+          regionCode: heatmapRegion.code,
+          severity,
+          riskReason: reason,
+          confidenceScore: asset.confidenceScore || 80,
+          assessmentId: assessment.id,
+          assessmentName: assessment.name,
+          rootDomain: assessment.scope?.rootDomain || '',
+          discoverySource: asset.discoverySource || 'Correlated Recon',
+        });
+
+        const geoRegionId: GeoRegionId = geo
+          ? geo.geoRegionId
+          : resolvedIp
+          ? 'north-america'
+          : 'unassigned';
+
+        const geoRegionLabel = geo
+          ? geo.geoRegionLabel
+          : resolvedIp
+          ? 'Resolving Region...'
+          : 'Hostname / No External IP';
+
+        assetRows.push({
+          id: `${assessment.id}_${asset.id}`,
+          asset,
+          assessment,
+          resolvedIp,
+          geo,
+          geoRegionId,
+          geoRegionLabel,
+          severity,
+          riskReason: reason,
+        });
+      }
+    }
+
+    const sevWeight: Record<string, number> = {
+      critical: 5,
+      high: 4,
+      medium: 3,
+      low: 2,
+      informational: 1,
+    };
+
+    assetRows.sort((a, b) => {
+      const extDiff = (b.geo?.isExternal ? 1 : 0) - (a.geo?.isExternal ? 1 : 0);
+      if (extDiff !== 0) return extDiff;
+      const ipDiff = (b.resolvedIp ? 1 : 0) - (a.resolvedIp ? 1 : 0);
+      if (ipDiff !== 0) return ipDiff;
+      return (sevWeight[b.severity] || 0) - (sevWeight[a.severity] || 0);
+    });
+
+    return {
+      clusteredAssetsForHeatmap: clustered,
+      dashboardAssetRows: assetRows,
+    };
+  }, [filteredAssessments, assessmentIntelMap, ipGeoMap]);
 
   // Multi-select handlers
   const isAllFilteredSelected =
@@ -225,14 +439,21 @@ export const Dashboard: React.FC<Props> = ({
     if (exportingPdfId) return;
     setExportingPdfId(assessment.id);
     try {
-      const findings = await firestoreService.getFindings(assessment.id);
+      const intel = await firestoreService.loadOrComputeAssessmentIntelligence(assessment);
       generateAssessmentSummaryPdf({
         assessment,
-        findings: findings || [],
-        totalFindingsCount: assessment.stats?.findingsCount,
+        assets: intel.assets,
+        dnsRecords: intel.dnsRecords,
+        endpoints: intel.endpoints,
+        services: intel.services,
+        relationships: intel.relationships,
+        aiAnalysis: intel.aiAnalysis,
+        findings: intel.findings,
+        riskProfile: intel.riskProfile,
+        totalFindingsCount: assessment.stats?.findingsCount || intel.findings.length,
       });
     } catch (err) {
-      console.warn(`Could not fetch findings before PDF export for ${assessment.id}:`, err);
+      console.warn(`Could not fetch full intelligence before PDF export for ${assessment.id}:`, err);
       generateAssessmentSummaryPdf({
         assessment,
         findings: [],
@@ -652,6 +873,24 @@ export const Dashboard: React.FC<Props> = ({
         })}
       </div>
 
+      {/* D3 Asset Distribution Heatmap (Geography x Risk Severity) */}
+      <AssetDistributionHeatmap
+        assessments={filteredAssessments}
+        preloadedClusteredAssets={clusteredAssetsForHeatmap}
+        externalLoadingIntel={loadingDashboardIntel}
+        onSelectAssessment={onSelectAssessment}
+      />
+
+      {/* Discovered Asset Inventory with External IP Geolocation & Geographic Region Filter */}
+      <DashboardAssetList
+        rows={dashboardAssetRows}
+        loading={loadingDashboardIntel}
+        resolvingGeo={resolvingGeo}
+        selectedGeoRegion={selectedGeoRegion}
+        onGeoRegionChange={setSelectedGeoRegion}
+        onSelectAssessment={onSelectAssessment}
+      />
+
       {/* Assessment Table / Empty State */}
       <div className="bg-[#111827] rounded-xl border border-slate-800 overflow-hidden shadow-lg">
         <div className="p-4 border-b border-slate-800 flex flex-wrap items-center justify-between gap-3">
@@ -917,6 +1156,7 @@ export const Dashboard: React.FC<Props> = ({
                   <th className="px-4 py-3">Status</th>
                   <th className="px-4 py-3">Discovered Assets</th>
                   <th className="px-4 py-3">Findings</th>
+                  <th className="px-4 py-3">Risk Score</th>
                   <th className="px-4 py-3">Created</th>
                   <th className="px-4 py-3 text-right">Actions &amp; Export</th>
                 </tr>
@@ -985,6 +1225,25 @@ export const Dashboard: React.FC<Props> = ({
                       <span className={`font-semibold ${a.stats?.findingsCount ? 'text-amber-400' : 'text-slate-500'}`}>
                         {a.stats?.findingsCount || 0}
                       </span>
+                    </td>
+                    <td className="px-4 py-3.5 font-mono tabular-nums">
+                      {a.stats?.riskScore !== undefined ? (
+                        <span
+                          className={`font-semibold ${
+                            a.stats.riskScore >= 80
+                              ? 'text-rose-400'
+                              : a.stats.riskScore >= 60
+                              ? 'text-orange-400'
+                              : a.stats.riskScore >= 35
+                              ? 'text-amber-400'
+                              : 'text-emerald-400'
+                          }`}
+                        >
+                          {a.stats.riskScore}/100
+                        </span>
+                      ) : (
+                        <span className="text-slate-500">—</span>
+                      )}
                     </td>
                     <td className="px-4 py-3.5 text-slate-400 text-[11px]">
                       {new Date(a.createdAt).toLocaleDateString()}

@@ -18,10 +18,12 @@ import {
   getFindings
 } from '../services/firestoreService';
 import { AttackSurfaceGraph } from '../components/graph/AttackSurfaceGraph';
+import { generateAssessmentSummaryPdf } from '../services/pdfReportGenerator';
 import {
   Database,
   Network,
   FileText,
+  FileDown,
   Settings as SettingsIcon,
   Search,
   Download,
@@ -425,6 +427,23 @@ export const GlobalReportsPage: React.FC<CommonProps> = ({
     URL.revokeObjectURL(url);
   };
 
+  const handleExportPdf = async () => {
+    if (!selectedAssessment) return;
+    const intel = await loadOrComputeAssessmentIntelligence(selectedAssessment);
+    generateAssessmentSummaryPdf({
+      assessment: selectedAssessment,
+      assets: intel.assets,
+      dnsRecords: intel.dnsRecords,
+      endpoints: intel.endpoints,
+      services: intel.services,
+      relationships: intel.relationships,
+      aiAnalysis: intel.aiAnalysis,
+      findings,
+      riskProfile: intel.riskProfile,
+      totalFindingsCount: findings.length || selectedAssessment.stats?.findingsCount,
+    });
+  };
+
   return (
     <div className="space-y-6">
       <div className="bg-slate-900/80 border border-slate-800 rounded-xl p-5 flex flex-col lg:flex-row lg:items-center justify-between gap-4">
@@ -452,8 +471,16 @@ export const GlobalReportsPage: React.FC<CommonProps> = ({
           </select>
 
           <button
+            onClick={handleExportPdf}
+            className="px-3.5 py-2 bg-gradient-to-r from-blue-600 to-cyan-600 hover:from-blue-500 hover:to-cyan-500 text-white rounded-lg text-xs sm:text-sm font-semibold flex items-center gap-2 cursor-pointer"
+          >
+            <FileDown className="w-4 h-4" />
+            Download PDF Report
+          </button>
+
+          <button
             onClick={handleExportComprehensiveJson}
-            className="px-3.5 py-2 bg-emerald-600 hover:bg-emerald-500 text-white rounded-lg text-xs sm:text-sm font-medium flex items-center gap-2"
+            className="px-3.5 py-2 bg-emerald-600 hover:bg-emerald-500 text-white rounded-lg text-xs sm:text-sm font-medium flex items-center gap-2 cursor-pointer"
           >
             <Download className="w-4 h-4" />
             Download Full Intelligence Dossier (JSON)

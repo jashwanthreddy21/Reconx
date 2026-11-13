@@ -28,12 +28,14 @@ import {
   AssessmentSnapshot,
   AssetChange,
   AIAnalysis,
+  AssessmentRiskProfile,
 } from '../types';
 import {
   runAssetCorrelationEngine,
   generateDeterministicAIAnalysis,
 } from './assetCorrelationEngine';
 import { createAssessmentSnapshot } from './changeDetectionEngine';
+import { calculateAssessmentRiskScore } from './riskScoringEngine';
 
 const BATCH_CHUNK_SIZE = 400;
 const DELETABLE_SUBCOLLECTIONS = [
@@ -507,6 +509,7 @@ export const firestoreService = {
     endpoints: WebEndpoint[];
     services: NetworkService[];
     findings: Finding[];
+    riskProfile: AssessmentRiskProfile;
   }> {
     const [rawAssets, dnsRecords, endpoints, services, findings] = await Promise.all([
       this.getAssets(assessment.id),
@@ -545,6 +548,14 @@ export const firestoreService = {
         findings
       );
 
+    const riskProfile = calculateAssessmentRiskScore({
+      assessment,
+      assets: correlated.normalizedAssets,
+      services,
+      endpoints,
+      findings,
+    });
+
     return {
       assets: correlated.normalizedAssets,
       relationships: correlated.relationships,
@@ -556,6 +567,7 @@ export const firestoreService = {
       endpoints,
       services,
       findings,
+      riskProfile,
     };
   },
 };
