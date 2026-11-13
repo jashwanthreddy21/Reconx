@@ -9,7 +9,7 @@ import {
   query,
   where,
   writeBatch,
-  type DocumentReference
+  type DocumentReference,
 } from 'firebase/firestore';
 import { db, handleFirestoreError, OperationType } from '../lib/firebase';
 import {
@@ -21,8 +21,19 @@ import {
   Finding,
   ScanJob,
   AuditLog,
-  UserProfile
+  UserProfile,
+  AssetRelationship,
+  AssetEvidence,
+  AssetCorrelation,
+  AssessmentSnapshot,
+  AssetChange,
+  AIAnalysis,
 } from '../types';
+import {
+  runAssetCorrelationEngine,
+  generateDeterministicAIAnalysis,
+} from './assetCorrelationEngine';
+import { createAssessmentSnapshot } from './changeDetectionEngine';
 
 const BATCH_CHUNK_SIZE = 400;
 const DELETABLE_SUBCOLLECTIONS = [
@@ -32,6 +43,11 @@ const DELETABLE_SUBCOLLECTIONS = [
   'services',
   'findings',
   'scan_jobs',
+  'relationships',
+  'evidences',
+  'snapshots',
+  'asset_changes',
+  'ai_analysis',
 ] as const;
 
 function stripUndefined<T>(value: T): T {
@@ -86,8 +102,12 @@ async function deleteDocumentRefsInChunks(refs: DocumentReference[]): Promise<vo
 async function deleteAssessmentSubcollections(assessmentId: string): Promise<void> {
   const refsToDelete: DocumentReference[] = [];
   for (const sub of DELETABLE_SUBCOLLECTIONS) {
-    const snap = await getDocs(collection(db, 'assessments', assessmentId, sub));
-    snap.forEach((d) => refsToDelete.push(d.ref));
+    try {
+      const snap = await getDocs(collection(db, 'assessments', assessmentId, sub));
+      snap.forEach((d) => refsToDelete.push(d.ref));
+    } catch {
+      // Ignore if subcollection doesn't exist
+    }
   }
   if (refsToDelete.length > 0) {
     await deleteDocumentRefsInChunks(refsToDelete);
@@ -140,8 +160,9 @@ export const firestoreService = {
       snap.forEach((d) => {
         results.push({ id: d.id, ...d.data() } as Assessment);
       });
-      // Sort client-side by createdAt descending to avoid composite index requirement
-      return results.sort((a, b) => new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime());
+      return results.sort(
+        (a, b) => new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime()
+      );
     } catch (err) {
       handleFirestoreError(err, OperationType.LIST, path);
     }
@@ -168,7 +189,7 @@ export const firestoreService = {
         ownerId: assessment.ownerId,
         actorEmail: assessment.ownerEmail,
         action: 'ASSESSMENT_CREATED',
-        details: `Created assessment "${assessment.name}" for target ${assessment.scope.rootDomain} (${assessment.type})`,
+        details: `Created assessment "${assessment.name}" for target ${assessment.scope?.rootDomain} (${assessment.type})`,
         timestamp: new Date().toISOString(),
       });
     } catch (err) {
@@ -179,10 +200,13 @@ export const firestoreService = {
   async updateAssessment(assessmentId: string, updates: Partial<Assessment>): Promise<void> {
     const path = `assessments/${assessmentId}`;
     try {
-      await updateDoc(doc(db, 'assessments', assessmentId), stripUndefined({
-        ...updates,
-        updatedAt: new Date().toISOString(),
-      }));
+      await updateDoc(
+        doc(db, 'assessments', assessmentId),
+        stripUndefined({
+          ...updates,
+          updatedAt: new Date().toISOString(),
+        })
+      );
     } catch (err) {
       handleFirestoreError(err, OperationType.UPDATE, path);
     }
@@ -325,7 +349,11 @@ export const firestoreService = {
   async saveScanJob(job: ScanJob): Promise<void> {
     const path = `assessments/${job.assessmentId}/scan_jobs/${job.id}`;
     try {
-      await setDoc(doc(db, 'assessments', job.assessmentId, 'scan_jobs', job.id), stripUndefined(job), { merge: true });
+      await setDoc(
+        doc(db, 'assessments', job.assessmentId, 'scan_jobs', job.id),
+        stripUndefined(job),
+        { merge: true }
+      );
     } catch (err) {
       handleFirestoreError(err, OperationType.WRITE, path);
     }
@@ -340,20 +368,215 @@ export const firestoreService = {
       const snap = await getDocs(collection(db, 'assessments', assessmentId, 'audit_logs'));
       const list: AuditLog[] = [];
       snap.forEach((d) => list.push({ id: d.id, ...d.data() } as AuditLog));
-      return list.sort((a, b) => new Date(b.timestamp).getTime() - new Date(a.timestamp).getTime());
+      return list.sort(
+        (a, b) => new Date(b.timestamp).getTime() - new Date(a.timestamp).getTime()
+      );
     } catch (err) {
       handleFirestoreError(err, OperationType.LIST, path);
     }
   },
 
   async addAuditLog(log: AuditLog): Promise<void> {
-    const path = log.assessmentId ? `assessments/${log.assessmentId}/audit_logs/${log.id}` : `audit_logs/${log.id}`;
+    const path = log.assessmentId
+      ? `assessments/${log.assessmentId}/audit_logs/${log.id}`
+      : `audit_logs/${log.id}`;
     try {
       if (log.assessmentId) {
-        await setDoc(doc(db, 'assessments', log.assessmentId, 'audit_logs', log.id), stripUndefined(log));
+        await setDoc(
+          doc(db, 'assessments', log.assessmentId, 'audit_logs', log.id),
+          stripUndefined(log)
+        );
       }
     } catch (err) {
       handleFirestoreError(err, OperationType.WRITE, path);
     }
   },
+
+  // ----------------------------------------------------
+  // CORRELATION RELATIONSHIPS & EVIDENCES
+  // ----------------------------------------------------
+  async getRelationships(assessmentId: string): Promise<AssetRelationship[]> {
+    try {
+      const snap = await getDocs(collection(db, 'assessments', assessmentId, 'relationships'));
+      const list: AssetRelationship[] = [];
+      snap.forEach((d) => list.push({ id: d.id, ...d.data() } as AssetRelationship));
+      return list;
+    } catch {
+      return [];
+    }
+  },
+
+  async saveRelationshipsBatch(
+    assessmentId: string,
+    relationships: AssetRelationship[]
+  ): Promise<void> {
+    return commitSetBatch(assessmentId, 'relationships', relationships);
+  },
+
+  async getEvidences(assessmentId: string): Promise<AssetEvidence[]> {
+    try {
+      const snap = await getDocs(collection(db, 'assessments', assessmentId, 'evidences'));
+      const list: AssetEvidence[] = [];
+      snap.forEach((d) => list.push({ id: d.id, ...d.data() } as AssetEvidence));
+      return list;
+    } catch {
+      return [];
+    }
+  },
+
+  async saveEvidencesBatch(assessmentId: string, evidences: AssetEvidence[]): Promise<void> {
+    return commitSetBatch(assessmentId, 'evidences', evidences);
+  },
+
+  // ----------------------------------------------------
+  // SNAPSHOTS, ASSET CHANGES & AI ANALYSIS
+  // ----------------------------------------------------
+  async getSnapshot(assessmentId: string): Promise<AssessmentSnapshot | null> {
+    try {
+      const snap = await getDocs(collection(db, 'assessments', assessmentId, 'snapshots'));
+      if (snap.empty) return null;
+      const d = snap.docs[0];
+      return { id: d.id, ...d.data() } as AssessmentSnapshot;
+    } catch {
+      return null;
+    }
+  },
+
+  async saveSnapshot(assessmentId: string, snapshot: AssessmentSnapshot): Promise<void> {
+    try {
+      await setDoc(
+        doc(db, 'assessments', assessmentId, 'snapshots', snapshot.id),
+        stripUndefined(snapshot),
+        { merge: true }
+      );
+    } catch {
+      // Non-fatal fallback
+    }
+  },
+
+  async getAssetChanges(assessmentId: string): Promise<AssetChange[]> {
+    try {
+      const snap = await getDocs(collection(db, 'assessments', assessmentId, 'asset_changes'));
+      const list: AssetChange[] = [];
+      snap.forEach((d) => list.push({ id: d.id, ...d.data() } as AssetChange));
+      return list;
+    } catch {
+      return [];
+    }
+  },
+
+  async saveAssetChanges(assessmentId: string, changes: AssetChange[]): Promise<void> {
+    try {
+      await commitSetBatch(assessmentId, 'asset_changes', changes);
+    } catch {
+      // Non-fatal fallback
+    }
+  },
+
+  async getAIAnalysis(assessmentId: string): Promise<AIAnalysis | null> {
+    try {
+      const snap = await getDocs(collection(db, 'assessments', assessmentId, 'ai_analysis'));
+      if (snap.empty) return null;
+      const d = snap.docs[0];
+      return { id: d.id, ...d.data() } as AIAnalysis;
+    } catch {
+      return null;
+    }
+  },
+
+  async saveAIAnalysis(assessmentId: string, analysis: AIAnalysis): Promise<void> {
+    try {
+      await setDoc(
+        doc(db, 'assessments', assessmentId, 'ai_analysis', analysis.id),
+        stripUndefined(analysis),
+        { merge: true }
+      );
+    } catch {
+      // Non-fatal fallback
+    }
+  },
+
+  async loadOrComputeAssessmentIntelligence(assessment: Assessment): Promise<{
+    assets: Asset[];
+    relationships: AssetRelationship[];
+    evidences: AssetEvidence[];
+    correlation: AssetCorrelation;
+    snapshot: AssessmentSnapshot;
+    aiAnalysis: AIAnalysis;
+    dnsRecords: DnsRecord[];
+    endpoints: WebEndpoint[];
+    services: NetworkService[];
+    findings: Finding[];
+  }> {
+    const [rawAssets, dnsRecords, endpoints, services, findings] = await Promise.all([
+      this.getAssets(assessment.id),
+      this.getDnsRecords(assessment.id),
+      this.getWebEndpoints(assessment.id),
+      this.getNetworkServices(assessment.id),
+      this.getFindings(assessment.id),
+    ]);
+
+    const correlated = runAssetCorrelationEngine(
+      assessment,
+      rawAssets,
+      dnsRecords,
+      endpoints,
+      services,
+      findings
+    );
+
+    const snapshot = createAssessmentSnapshot(
+      assessment,
+      correlated.normalizedAssets,
+      correlated.relationships,
+      dnsRecords,
+      endpoints,
+      services
+    );
+
+    const existingAI = await this.getAIAnalysis(assessment.id);
+    const aiAnalysis =
+      existingAI ||
+      generateDeterministicAIAnalysis(
+        assessment,
+        correlated.normalizedAssets,
+        correlated.relationships,
+        correlated.correlationSummary,
+        findings
+      );
+
+    return {
+      assets: correlated.normalizedAssets,
+      relationships: correlated.relationships,
+      evidences: correlated.evidences,
+      correlation: correlated.correlationSummary,
+      snapshot,
+      aiAnalysis,
+      dnsRecords,
+      endpoints,
+      services,
+      findings,
+    };
+  },
 };
+
+export const loadOrComputeAssessmentIntelligence = (assessment: Assessment) =>
+  firestoreService.loadOrComputeAssessmentIntelligence(assessment);
+
+export const saveAIAnalysis = (assessmentId: string, analysis: AIAnalysis) =>
+  firestoreService.saveAIAnalysis(assessmentId, analysis);
+
+export const saveAssetChanges = (assessmentId: string, changes: AssetChange[]) =>
+  firestoreService.saveAssetChanges(assessmentId, changes);
+
+export const getDnsRecords = (assessmentId: string) =>
+  firestoreService.getDnsRecords(assessmentId);
+
+export const getWebEndpoints = (assessmentId: string) =>
+  firestoreService.getWebEndpoints(assessmentId);
+
+export const getNetworkServices = (assessmentId: string) =>
+  firestoreService.getNetworkServices(assessmentId);
+
+export const getFindings = (assessmentId: string) =>
+  firestoreService.getFindings(assessmentId);

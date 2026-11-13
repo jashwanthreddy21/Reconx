@@ -148,6 +148,78 @@ service cloud.firestore {
         allow update: if false; // Audit logs are immutable
         allow delete: if isAdmin();
       }
+
+      // Subcollection: relationships (Feature 1 & 2)
+      match /relationships/{relId} {
+        allow get: if isAssessmentOwner(assessmentId);
+        allow list: if isSignedIn() && (resource.data.ownerId == request.auth.uid || isAdmin());
+        allow create: if isAssessmentOwner(assessmentId) &&
+          request.resource.data.ownerId == request.auth.uid &&
+          request.resource.data.assessmentId == assessmentId;
+        allow update: if isAssessmentOwner(assessmentId) &&
+          request.resource.data.ownerId == resource.data.ownerId;
+        allow delete: if isAssessmentOwner(assessmentId);
+      }
+
+      // Subcollection: evidences (Feature 1 & 2)
+      match /evidences/{evId} {
+        allow get: if isAssessmentOwner(assessmentId);
+        allow list: if isSignedIn() && (resource.data.ownerId == request.auth.uid || isAdmin());
+        allow create: if isAssessmentOwner(assessmentId) &&
+          request.resource.data.ownerId == request.auth.uid &&
+          request.resource.data.assessmentId == assessmentId;
+        allow update: if isAssessmentOwner(assessmentId) &&
+          request.resource.data.ownerId == resource.data.ownerId;
+        allow delete: if isAssessmentOwner(assessmentId);
+      }
+
+      // Subcollection: correlations (Feature 1)
+      match /correlations/{corrId} {
+        allow get: if isAssessmentOwner(assessmentId);
+        allow list: if isSignedIn() && (resource.data.ownerId == request.auth.uid || isAdmin());
+        allow create: if isAssessmentOwner(assessmentId) &&
+          request.resource.data.ownerId == request.auth.uid &&
+          request.resource.data.assessmentId == assessmentId;
+        allow update: if isAssessmentOwner(assessmentId) &&
+          request.resource.data.ownerId == resource.data.ownerId;
+        allow delete: if isAssessmentOwner(assessmentId);
+      }
+
+      // Subcollection: snapshots (Feature 3)
+      match /snapshots/{snapId} {
+        allow get: if isAssessmentOwner(assessmentId);
+        allow list: if isSignedIn() && (resource.data.ownerId == request.auth.uid || isAdmin());
+        allow create: if isAssessmentOwner(assessmentId) &&
+          request.resource.data.ownerId == request.auth.uid &&
+          request.resource.data.assessmentId == assessmentId;
+        allow update: if isAssessmentOwner(assessmentId) &&
+          request.resource.data.ownerId == resource.data.ownerId;
+        allow delete: if isAssessmentOwner(assessmentId);
+      }
+
+      // Subcollection: changes (Feature 3)
+      match /changes/{changeId} {
+        allow get: if isAssessmentOwner(assessmentId);
+        allow list: if isSignedIn() && (resource.data.ownerId == request.auth.uid || isAdmin());
+        allow create: if isAssessmentOwner(assessmentId) &&
+          request.resource.data.ownerId == request.auth.uid &&
+          request.resource.data.assessmentId == assessmentId;
+        allow update: if isAssessmentOwner(assessmentId) &&
+          request.resource.data.ownerId == resource.data.ownerId;
+        allow delete: if isAssessmentOwner(assessmentId);
+      }
+
+      // Subcollection: ai_analyses (Feature 1)
+      match /ai_analyses/{analysisId} {
+        allow get: if isAssessmentOwner(assessmentId);
+        allow list: if isSignedIn() && (resource.data.ownerId == request.auth.uid || isAdmin());
+        allow create: if isAssessmentOwner(assessmentId) &&
+          request.resource.data.ownerId == request.auth.uid &&
+          request.resource.data.assessmentId == assessmentId;
+        allow update: if isAssessmentOwner(assessmentId) &&
+          request.resource.data.ownerId == resource.data.ownerId;
+        allow delete: if isAssessmentOwner(assessmentId);
+      }
     }
   }
 }

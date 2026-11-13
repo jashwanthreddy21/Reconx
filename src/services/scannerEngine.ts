@@ -6,8 +6,14 @@ import {
   NetworkService,
   Finding,
   ScanJob,
-  DnsRecordType
+  DnsRecordType,
+  AssetRelationship,
+  AssetEvidence,
+  AssetCorrelation,
+  AssessmentSnapshot,
 } from '../types';
+import { runAssetCorrelationEngine } from './assetCorrelationEngine';
+import { createAssessmentSnapshot } from './changeDetectionEngine';
 
 export interface ScannerProgressCallback {
   onJobUpdate: (job: ScanJob) => void;
@@ -95,6 +101,10 @@ export class ScannerOrchestrator {
     services: NetworkService[];
     findings: Finding[];
     jobs: ScanJob[];
+    relationships: AssetRelationship[];
+    evidences: AssetEvidence[];
+    correlation: AssetCorrelation;
+    snapshot: AssessmentSnapshot;
   }> {
     this.abortController = new AbortController();
     const signal = this.abortController.signal;
@@ -852,13 +862,33 @@ export class ScannerOrchestrator {
       callbacks.onFindingsGenerated(generatedFindings);
     }
 
+    const corr = runAssetCorrelationEngine(
+      assessment,
+      discoveredAssets,
+      discoveredDns,
+      discoveredEndpoints,
+      discoveredServices
+    );
+    const snapshot = createAssessmentSnapshot(
+      assessment,
+      corr.normalizedAssets,
+      corr.relationships,
+      discoveredDns,
+      discoveredEndpoints,
+      discoveredServices
+    );
+
     return {
-      assets: discoveredAssets,
+      assets: corr.normalizedAssets,
       dnsRecords: discoveredDns,
       endpoints: discoveredEndpoints,
       services: discoveredServices,
       findings: generatedFindings,
       jobs: executionJobs,
+      relationships: corr.relationships,
+      evidences: corr.evidences,
+      correlation: corr.correlationSummary,
+      snapshot,
     };
   }
 
@@ -876,6 +906,10 @@ export class ScannerOrchestrator {
     services: NetworkService[];
     findings: Finding[];
     jobs: ScanJob[];
+    relationships: AssetRelationship[];
+    evidences: AssetEvidence[];
+    correlation: AssetCorrelation;
+    snapshot: AssessmentSnapshot;
   }> {
     const rootDomain = (assessment.scope.rootDomain || 'juiceshop.lab.internal')
       .trim()
@@ -1758,13 +1792,33 @@ export class ScannerOrchestrator {
       callbacks.onFindingsGenerated(findings);
     }
 
-    return {
+    const corr = runAssetCorrelationEngine(
+      assessment,
       assets,
+      dnsRecords,
+      endpoints,
+      services
+    );
+    const snapshot = createAssessmentSnapshot(
+      assessment,
+      corr.normalizedAssets,
+      corr.relationships,
+      dnsRecords,
+      endpoints,
+      services
+    );
+
+    return {
+      assets: corr.normalizedAssets,
       dnsRecords,
       endpoints,
       services,
       findings,
       jobs,
+      relationships: corr.relationships,
+      evidences: corr.evidences,
+      correlation: corr.correlationSummary,
+      snapshot,
     };
   }
 }

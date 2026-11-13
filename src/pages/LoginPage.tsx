@@ -131,10 +131,10 @@ export const LoginPage: React.FC<LoginPageProps> = ({
   const activeError = localError || authError;
 
   return (
-    <div className="min-h-screen bg-[#0B1020] text-slate-100 flex flex-col justify-between selection:bg-blue-600 selection:text-white font-sans">
+    <div className="min-h-screen bg-[#0B1020] text-slate-100 flex flex-col justify-between selection:bg-blue-600 selection:text-white font-sans w-full max-w-full overflow-x-hidden">
       {/* Top minimal header */}
-      <header className="h-16 border-b border-slate-800/80 px-4 sm:px-6 flex items-center justify-between bg-[#111827]/80 backdrop-blur sticky top-0 z-20">
-        <div className="flex items-center gap-3">
+      <header className="h-14 sm:h-16 border-b border-slate-800/80 px-3 sm:px-6 flex items-center justify-between bg-[#111827]/90 backdrop-blur sticky top-0 z-20 w-full">
+        <div className="flex items-center gap-2 sm:gap-3">
           {onNavigateToHome && (
             <button
               onClick={onNavigateToHome}
@@ -148,12 +148,12 @@ export const LoginPage: React.FC<LoginPageProps> = ({
 
           <div
             onClick={onNavigateToHome}
-            className="flex items-center gap-2.5 cursor-pointer group"
+            className="flex items-center gap-2 sm:gap-2.5 cursor-pointer group"
           >
-            <div className="w-8 h-8 rounded-lg bg-gradient-to-tr from-blue-600 to-cyan-500 flex items-center justify-center shadow-lg shadow-blue-500/20 group-hover:scale-105 transition-transform">
-              <ShieldAlert className="w-5 h-5 text-white" />
+            <div className="w-7 h-7 sm:w-8 sm:h-8 rounded-lg bg-gradient-to-tr from-blue-600 to-cyan-500 flex items-center justify-center shadow-md shadow-blue-500/20 group-hover:scale-105 transition-transform">
+              <ShieldAlert className="w-4 h-4 sm:w-5 sm:h-5 text-white" />
             </div>
-            <span className="font-bold tracking-wider text-base text-white">
+            <span className="font-bold tracking-wider text-sm sm:text-base text-white">
               RECON<span className="text-cyan-400">X</span>
             </span>
           </div>
@@ -163,7 +163,7 @@ export const LoginPage: React.FC<LoginPageProps> = ({
           <span className="text-xs text-slate-400 hidden sm:inline">Need an account?</span>
           <button
             onClick={onNavigateToSignup}
-            className="px-3 py-1.5 bg-slate-800 hover:bg-slate-700 text-cyan-400 border border-slate-700 rounded-lg text-xs font-semibold transition-all cursor-pointer"
+            className="px-3 py-1.5 bg-slate-800 hover:bg-slate-700 text-cyan-400 border border-slate-700 rounded-lg text-xs font-semibold transition-all cursor-pointer min-h-[36px]"
           >
             Sign Up
           </button>
@@ -171,10 +171,10 @@ export const LoginPage: React.FC<LoginPageProps> = ({
       </header>
 
       {/* Main Container */}
-      <main className="flex-1 flex items-center justify-center p-4 sm:p-6 lg:p-8">
+      <main className="flex-1 flex items-center justify-center p-3 sm:p-6 lg:p-8 w-full max-w-full">
         <div className="w-full max-w-md my-auto">
           {/* Sign In Card */}
-          <div className="bg-[#111827] border border-slate-800 rounded-2xl p-6 sm:p-8 flex flex-col justify-between shadow-2xl relative">
+          <div className="bg-[#111827] border border-slate-800 rounded-xl sm:rounded-2xl p-4 sm:p-8 flex flex-col justify-between shadow-2xl relative w-full">
             <div>
               {/* Form Mode Selector Header */}
               <div className="flex items-center justify-between border-b border-slate-800 pb-4 mb-6">

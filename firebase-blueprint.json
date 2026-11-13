@@ -110,7 +110,7 @@
         },
         "assetType": {
           "type": "string",
-          "enum": ["root_domain", "subdomain", "ip_address", "endpoint", "service", "technology"],
+          "enum": ["root_domain", "subdomain", "ip_address", "port", "endpoint", "service", "technology"],
           "description": "Category of asset"
         },
         "discoverySource": {
@@ -433,6 +433,84 @@
         }
       },
       "required": ["ownerId", "action", "timestamp"]
+    },
+    "AssetRelationship": {
+      "title": "AssetRelationship",
+      "description": "Correlated relationship between two normalized assets",
+      "type": "object",
+      "properties": {
+        "assessmentId": { "type": "string" },
+        "ownerId": { "type": "string" },
+        "sourceAssetId": { "type": "string" },
+        "targetAssetId": { "type": "string" },
+        "relationshipType": { "type": "string" },
+        "confidenceScore": { "type": "number" },
+        "evidenceId": { "type": "string" }
+      },
+      "required": ["assessmentId", "ownerId", "sourceAssetId", "targetAssetId", "relationshipType", "confidenceScore", "evidenceId"]
+    },
+    "AssetEvidence": {
+      "title": "AssetEvidence",
+      "description": "Preserved tool output evidence for correlated assets and relationships",
+      "type": "object",
+      "properties": {
+        "assessmentId": { "type": "string" },
+        "ownerId": { "type": "string" },
+        "assetId": { "type": "string" },
+        "sourceTool": { "type": "string" },
+        "rawOutputReference": { "type": "string" },
+        "discoveredAt": { "type": "string" }
+      },
+      "required": ["assessmentId", "ownerId", "assetId", "sourceTool", "rawOutputReference", "discoveredAt"]
+    },
+    "AssetCorrelation": {
+      "title": "AssetCorrelation",
+      "description": "Aggregated asset correlation intelligence summary",
+      "type": "object",
+      "properties": {
+        "assessmentId": { "type": "string" },
+        "ownerId": { "type": "string" },
+        "generatedAt": { "type": "string" }
+      },
+      "required": ["assessmentId", "ownerId", "generatedAt"]
+    },
+    "AssessmentSnapshot": {
+      "title": "AssessmentSnapshot",
+      "description": "Immutable historical snapshot of completed assessment state",
+      "type": "object",
+      "properties": {
+        "assessmentId": { "type": "string" },
+        "ownerId": { "type": "string" },
+        "snapshotTimestamp": { "type": "string" },
+        "completionStatus": { "type": "string" }
+      },
+      "required": ["assessmentId", "ownerId", "snapshotTimestamp", "completionStatus"]
+    },
+    "AssetChange": {
+      "title": "AssetChange",
+      "description": "Historical attack surface change record between assessments",
+      "type": "object",
+      "properties": {
+        "assessmentId": { "type": "string" },
+        "previousAssessmentId": { "type": "string" },
+        "ownerId": { "type": "string" },
+        "assetId": { "type": "string" },
+        "changeType": { "type": "string", "enum": ["NEW", "NOT_OBSERVED", "MODIFIED"] },
+        "detectedAt": { "type": "string" }
+      },
+      "required": ["assessmentId", "previousAssessmentId", "ownerId", "assetId", "changeType", "detectedAt"]
+    },
+    "AIAnalysis": {
+      "title": "AIAnalysis",
+      "description": "AI-powered or deterministic attack surface correlation analysis",
+      "type": "object",
+      "properties": {
+        "assessmentId": { "type": "string" },
+        "ownerId": { "type": "string" },
+        "generatedAt": { "type": "string" },
+        "executiveSummary": { "type": "string" }
+      },
+      "required": ["assessmentId", "ownerId", "generatedAt", "executiveSummary"]
     }
   },
   "firestore": {
@@ -471,6 +549,30 @@
     "/assessments/{assessmentId}/audit_logs/{logId}": {
       "schema": "AuditLog",
       "description": "Audit trail entries for assessment actions"
+    },
+    "/assessments/{assessmentId}/relationships/{relId}": {
+      "schema": "AssetRelationship",
+      "description": "Correlated asset relationships"
+    },
+    "/assessments/{assessmentId}/evidences/{evId}": {
+      "schema": "AssetEvidence",
+      "description": "Preserved tool output evidence"
+    },
+    "/assessments/{assessmentId}/correlations/{corrId}": {
+      "schema": "AssetCorrelation",
+      "description": "Correlation summary records"
+    },
+    "/assessments/{assessmentId}/snapshots/{snapId}": {
+      "schema": "AssessmentSnapshot",
+      "description": "Immutable historical snapshots"
+    },
+    "/assessments/{assessmentId}/changes/{changeId}": {
+      "schema": "AssetChange",
+      "description": "Historical attack surface change records"
+    },
+    "/assessments/{assessmentId}/ai_analyses/{analysisId}": {
+      "schema": "AIAnalysis",
+      "description": "AI-powered and deterministic correlation analyses"
     }
   }
 }
